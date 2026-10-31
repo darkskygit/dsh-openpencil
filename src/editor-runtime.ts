@@ -182,7 +182,7 @@ export function parseEditorRuntimeCatalog(value: unknown): EditorRuntimeCatalog 
     const platform = entry as unknown as EditorRuntimePlatform
     const selector = `${platform.os}-${platform.cpu}`
     if (platform.id !== selector) catalogError(`platforms[${index}].id must equal ${selector}`)
-    const expectedPackageName = `@zseven-w/dsh-openpencil-${platform.id}`
+    const expectedPackageName = `@darkskygit/dsh-openpencil-${platform.id}`
     if (platform.packageName !== expectedPackageName) {
       catalogError(`platforms[${index}].packageName must equal ${expectedPackageName}`)
     }

@@ -1,0 +1,54 @@
+[package]
+name         = "jian-core"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Jian UI framework core — document, signals, scene graph, render trait."
+readme       = "README.md"
+
+[features]
+default = []
+# Dev-only Agent Shell Protocol (Plan 18). Enables the
+# `Capability::Automation` graded capability and its `AutomationLevel`
+# lattice. Production builds leave this off — production AI access is
+# governed by `jian-action-surface`'s availability state machine
+# (`SemanticsMeta.aiHidden`), not the capability gate.
+dev-asp = []
+
+[dependencies]
+jian-ops-schema = { path = "../jian-ops-schema" }
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+thiserror       = { workspace = true }
+smallvec        = "1.13"
+slotmap         = "1.0"
+euclid          = "0.22"
+taffy           = "0.5"
+rstar           = "0.12"
+bitflags        = { version = "2.6", features = ["serde"] }
+async-trait     = "0.1"
+futures         = "0.3"
+base64          = "0.22"
+sha2            = "0.10"
+url             = "2.5"
+libc            = "0.2"
+# Transliterate Unicode strings to ASCII for slug normalisation
+# (spec §3.3 — Chinese/Japanese/Korean/etc → English-ish).
+deunicode       = "1.6"
+unicode-segmentation = "1.13"
+
+[dev-dependencies]
+insta     = { workspace = true }
+criterion = { version = "0.5", features = ["html_reports"] }
+proptest  = "1.5"
+tempfile  = "3"
+
+[[bench]]
+name    = "signal_update"
+harness = false
+
+[[bench]]
+name    = "expr_eval"
+harness = false

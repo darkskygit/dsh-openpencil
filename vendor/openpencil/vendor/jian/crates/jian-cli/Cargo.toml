@@ -1,0 +1,154 @@
+[package]
+name         = "jian"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+authors      = { workspace = true }
+description  = "Command-line toolchain for the Jian runtime (.op files)"
+
+[features]
+# Default enables the `player` + `dev` subcommands, which pull in the
+# winit event loop + softbuffer via jian-host-desktop's `run` feature.
+# `dev` additionally pulls in `notify` for filesystem watching.
+# Disable for a headless-only build (`cargo build --no-default-features`).
+default = ["player"]
+player  = ["dep:jian-host-desktop", "dep:notify"]
+# `jian dev --mcp` flag. Pulls the MCP server from
+# `jian-action-surface` + the host's mcp drain integration. Off by
+# default so the headless / no-rmcp build path stays tight.
+mcp     = ["player", "jian-host-desktop/mcp", "dep:jian-action-surface"]
+# Plan 18 ASP prod mode / C4 — enables the `jian player --asp <path>`
+# flag for token-efficient agent driving against a production .op.
+# Pulls in jian-asp directly (path resolution + Unix socket /
+# Named Pipe transports + run_prod_session entry point). Off by
+# default so the released CLI binary's wire surface stays small;
+# downstream packagers building an "AI-driving" channel turn this on.
+prod-asp = [
+    "player",
+    "dep:jian-asp",
+    "jian-host-desktop/prod-asp",
+    # Pull windows-sys into jian-cli's own dep graph; the Windows
+    # accept-thread cancel path uses it directly. Re-using
+    # jian-asp's transitive copy is not enough — Rust deps are
+    # not transitive. The Windows-only target table below scopes
+    # the actual link.
+    "dep:windows-sys",
+]
+
+[dependencies]
+jian-core        = { path = "../jian-core" }
+jian-ops-schema  = { path = "../jian-ops-schema" }
+jian-host-desktop = { path = "../jian-host-desktop", optional = true, features = ["run"] }
+jian-action-surface = { path = "../jian-action-surface", optional = true, features = ["mcp"] }
+# Plan 18 ASP prod mode (C4): only pulled in when `prod-asp` is on.
+jian-asp         = { path = "../jian-asp", optional = true, default-features = false, features = ["prod-asp"] }
+clap             = { version = "4", features = ["derive"] }
+anyhow           = "1"
+serde            = { workspace = true }
+serde_json       = { workspace = true }
+zip              = { version = "2.2", default-features = false, features = ["deflate"] }
+blake3           = "1.5"
+notify           = { version = "6", optional = true }
+# `jian perf startup` drives the StartupDriver via futures::executor::block_on.
+futures          = "0.3"
+# PNG decoder for the CLI's default app-icon loader (player + dev paths).
+# Lighter than the `image` crate and PNG covers the common case for
+# `app.icon` and `--icon` flags; hosts that need ICO / JPEG decode it
+# themselves before constructing `HostConfig`.
+png              = "0.17"
+
+[dev-dependencies]
+assert_cmd      = "2"
+predicates      = "3"
+tempfile        = "3"
+
+[[bin]]
+name = "jian"
+path = "src/main.rs"
+
+# `cargo bundle` config (Plan 8 Task 10). Run `cargo bundle --release`
+# from this crate's directory on macOS to build `target/release/bundle/
+# osx/Jian.app`. The Linux / Windows variants of `cargo bundle`
+# produce `.deb` / `.msi` from the same metadata.
+#
+# `identifier` follows the reverse-DNS bundle id convention; the
+# concrete release pipeline can override via `--manifest-path`. Icon
+# comes from `packaging/icon/AppIcon.icns` once the icon-set is generated
+# (a follow-up commit ships the .icns; the placeholder path is
+# checked in `packaging/README.md`).
+[package.metadata.bundle]
+name = "Jian"
+identifier = "dev.jian.cli"
+icon = ["../../packaging/icon/AppIcon.icns"]
+short_description = "Jian runtime CLI — check, pack, and run .op files"
+long_description = """
+Jian is the runtime that backs OpenPencil — a vector design tool that
+exports .op files. The `jian` CLI validates, packs, and previews those
+files standalone.
+"""
+copyright = "Copyright (c) 2026 ZSeven-W"
+category = "Developer Tool"
+osx_minimum_system_version = "10.15"
+# `osx_url_schemes` (cargo-bundle) is intentionally OMITTED — codex
+# round 2 HIGH. Setting it here re-injects `CFBundleURLTypes` into
+# the generated Info.plist regardless of the Info.plist.in template
+# body, which defeats the Plan 8 §C5 deferral (no NSApplicationDelegate
+# Apple-Event subclass yet → registering the scheme black-holes deep
+# links). Re-add this line in the per-platform CI follow-up that
+# lands the receiver.
+
+# `cargo wix` config (Plan 8 Task 10 / C2, Windows MSI). Run
+# `cargo wix --no-build --nocapture` from this crate's directory on
+# Windows once the toolchain is installed (`cargo install cargo-wix`)
+# and a `wix/main.wxs` lives under this crate. The wxs template
+# itself ships in `packaging/windows/wix/main.wxs.tmpl`; the release
+# script substitutes `@@VERSION@@` / `@@UPGRADE_GUID@@` and renders
+# the per-version copy. The placeholder GUIDs below are pinned at
+# template time; the release script overrides via the `--upgrade-guid`
+# CLI flag of `cargo wix` to keep the on-disk Cargo.toml stable.
+[package.metadata.wix]
+upgrade-guid = "00000000-0000-0000-0000-000000000000"
+path-guid = "00000000-0000-0000-0000-000000000001"
+
+# `cargo deb` config (Plan 8 Task 10 / C3, Debian / Ubuntu .deb).
+# Run `cargo deb --no-build` from this crate's directory after a
+# `cargo build --release -p jian --target x86_64-unknown-linux-gnu`.
+# Outputs `target/debian/jian_<VERSION>_amd64.deb`. The .desktop and
+# MIME-type files in `packaging/linux/` get installed under
+# `/usr/share/{applications,mime/packages}` so the launcher and
+# `xdg-mime` see `.op` files immediately.
+[package.metadata.deb]
+maintainer = "ZSeven-W <noreply@zseven.dev>"
+copyright = "Copyright (c) 2026 ZSeven-W"
+license-file = ["../../LICENSE", "0"]
+extended-description = """
+Jian is the runtime that backs OpenPencil — a vector design tool that
+exports .op files. The `jian` CLI validates, packs, and previews
+those files standalone.
+"""
+section = "graphics"
+priority = "optional"
+depends = "$auto, libfontconfig1, libfreetype6"
+assets = [
+    ["target/release/jian", "usr/bin/", "755"],
+    ["../../packaging/linux/jian.desktop", "usr/share/applications/", "644"],
+    ["../../packaging/linux/jian.mime.xml", "usr/share/mime/packages/", "644"],
+    ["../../packaging/icon/AppIcon-source.png", "usr/share/icons/hicolor/512x512/apps/jian.png", "644"],
+    ["../../packaging/README.md", "usr/share/doc/jian/", "644"],
+]
+
+# Plan 18 ASP prod mode / Windows shutdown path. The CLI's
+# `AspSession::Drop` + the listener accept thread call
+# `OpenThread` / `CancelSynchronousIo` / `CloseHandle` directly
+# (Rust dep graphs are not transitive — using `windows_sys::...`
+# from jian-cli requires jian-cli's own dep declaration even
+# when jian-asp also pulls it in). Gated to the Windows target
+# so non-Windows builds skip the crate compile cost.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_System_Threading",
+    "Win32_System_IO",
+] }

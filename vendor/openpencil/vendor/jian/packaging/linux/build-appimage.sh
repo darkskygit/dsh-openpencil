@@ -1,0 +1,100 @@
+#!/usr/bin/env bash
+# Build a Linux AppImage from the release binary at
+# `target/<TARGET>/release/jian`. Requires `linuxdeploy`
+# (https://github.com/linuxdeploy/linuxdeploy/releases) on PATH.
+#
+# Usage:
+#   ./packaging/linux/build-appimage.sh [TARGET]
+#
+# TARGET defaults to `x86_64-unknown-linux-gnu`. Outputs
+# `target/<TARGET>/release/Jian-<VERSION>-x86_64.AppImage`.
+#
+# The release CI workflow (.github/workflows/release.yml) currently
+# packages `.tar.gz` archives only; AppImage is opt-in for users
+# who want the self-contained format. The script also installs
+# `packaging/linux/jian.desktop` + `jian.mime.xml` into the AppDir so
+# `.op` file double-click works after `appimaged` registers the
+# bundle. `jian://` URL-scheme handling is intentionally OFF —
+# `jian.desktop` deliberately omits `x-scheme-handler/jian` (Plan 8
+# §C7), and the matching `xdg-mime default` line in
+# `install-mime.sh` skips the URL scheme too. Re-enable once the
+# CLI has a single-instance forwarding entry point.
+
+set -euo pipefail
+
+TARGET="${1:-x86_64-unknown-linux-gnu}"
+ROOT="$(cd "$(dirname "$0")"/../.. && pwd)"
+BIN="$ROOT/target/$TARGET/release/jian"
+VERSION="$(awk -F\" '/^version[[:space:]]*=/ {print $2; exit}' "$ROOT/Cargo.toml")"
+
+if [ ! -x "$BIN" ]; then
+    echo "build-appimage: missing release binary at $BIN" >&2
+    echo "  run \`cargo build --release -p jian --target $TARGET\` first" >&2
+    exit 1
+fi
+
+if ! command -v linuxdeploy >/dev/null 2>&1; then
+    echo "build-appimage: linuxdeploy not on PATH; install from" >&2
+    echo "  https://github.com/linuxdeploy/linuxdeploy/releases" >&2
+    exit 1
+fi
+
+WORK="$(mktemp -d)"
+trap 'rm -rf "$WORK"' EXIT
+
+APPDIR="$WORK/AppDir"
+mkdir -p "$APPDIR/usr/bin"
+mkdir -p "$APPDIR/usr/share/mime/packages"
+mkdir -p "$APPDIR/usr/share/applications"
+
+cp "$BIN" "$APPDIR/usr/bin/jian"
+cp "$ROOT/packaging/linux/jian.desktop" "$APPDIR/usr/share/applications/"
+cp "$ROOT/packaging/linux/jian.mime.xml" "$APPDIR/usr/share/mime/packages/"
+# Icon: the release pipeline drops a 256x256 PNG at `packaging/icon/jian.png`
+# before invoking this script. We require a real PNG file rather than
+# attempting to synthesise one — `linuxdeploy --icon-file` validates
+# the bytes and rejects malformed input, and silently writing a 1x1
+# placeholder masks a configuration mistake the release script
+# should surface.
+ICON_SRC="$ROOT/packaging/icon/jian.png"
+if [ ! -f "$ICON_SRC" ]; then
+    echo "build-appimage: missing icon at $ICON_SRC" >&2
+    echo "  drop a 256x256 PNG there before re-running, or wire the" >&2
+    echo "  release pipeline to generate one." >&2
+    exit 1
+fi
+cp "$ICON_SRC" "$APPDIR/usr/share/applications/jian.png"
+
+cd "$WORK"
+ARCH="$(uname -m)"
+
+# AppImageUpdate (Plan 8 §T9 / C10): embed a `zsync` update URL so
+# users can `appimageupdate Jian-*.AppImage` to delta-update from a
+# static feed bucket instead of re-downloading the full image. The
+# release script exports `APPIMAGE_UPDATE_URL` pointing at
+# `https://get.jian.dev/releases/Jian-x86_64.AppImage.zsync`. Skipping
+# the env var produces a non-updateable bundle (still functional,
+# just without delta updates) — the warning fires once per release
+# run rather than aborting the build.
+#
+# linuxdeploy doesn't expose a dedicated `--update-information` flag,
+# but the underlying `appimagetool` invocation it spawns reads
+# `UPDATE_INFORMATION` from the env. Codex round 1 HIGH fix:
+# `export` BEFORE the `linuxdeploy --output appimage` step so
+# appimagetool sees the value during the wrap pass.
+if [ -n "${APPIMAGE_UPDATE_URL:-}" ]; then
+    export UPDATE_INFORMATION="zsync|$APPIMAGE_UPDATE_URL"
+    echo "build-appimage: embedding update channel: $APPIMAGE_UPDATE_URL"
+else
+    echo "build-appimage: \$APPIMAGE_UPDATE_URL unset → no AppImageUpdate metadata" >&2
+fi
+
+linuxdeploy \
+    --appdir "$APPDIR" \
+    --desktop-file "$APPDIR/usr/share/applications/jian.desktop" \
+    --icon-file "$APPDIR/usr/share/applications/jian.png" \
+    --output appimage
+
+OUT_NAME="Jian-${VERSION}-${ARCH}.AppImage"
+mv ./*.AppImage "$ROOT/target/$TARGET/release/$OUT_NAME"
+echo "build-appimage: wrote target/$TARGET/release/$OUT_NAME"

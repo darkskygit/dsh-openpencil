@@ -1,5 +1,5 @@
 {
-  "name": "@zseven-w/dsh-openpencil",
+  "name": "@darkskygit/dsh-openpencil",
   "version": "0.1.0-rc.14",
   "description": "Preview, inspect, and edit real .op OpenPencil design documents inside DSH conversations — headless rendering, a read-only canvas, and a managed editor.",
   "license": "MIT",
@@ -11,11 +11,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/ZSeven-W/dsh-openpencil.git"
+    "url": "git+https://github.com/darkskygit/dsh-openpencil.git"
   },
   "type": "module",
   "publishConfig": {
-    "access": "public"
+    "access": "public",
+    "registry": "https://npm.pkg.github.com"
   },
   "engines": {
     "node": ">=24.11.0"
@@ -39,7 +40,7 @@
     "scripts",
     "platforms.json",
     "cordis.patch.yml",
-    "README.*.md",
+    "README.md",
     "docs/images/dsh-openpencil-overview.png",
     "docs/images/dsh-openpencil-logo.png",
     "LICENSE",
@@ -69,8 +70,7 @@
     "release:check": "node scripts/check-release-version.mjs",
     "pack:artifact": "node scripts/pack-package.mjs",
     "verify:install": "node scripts/verify-selective-install.mjs",
-    "release:publish": "node scripts/publish-release.mjs",
-    "test:release-publish": "node --test tests/registry-convergence.test.mjs && node scripts/publish-release.mjs --self-test"
+    "publish:packages": "node scripts/publish-packages.mjs"
   },
   "packageManager": "pnpm@10.12.1",
   "pnpm": {
@@ -133,12 +133,12 @@
     "react-dom": "^18.2.0"
   },
   "optionalDependencies": {
-    "@zseven-w/dsh-openpencil-darwin-arm64": "0.1.0-rc.14",
-    "@zseven-w/dsh-openpencil-darwin-x64": "0.1.0-rc.14",
-    "@zseven-w/dsh-openpencil-linux-arm64": "0.1.0-rc.14",
-    "@zseven-w/dsh-openpencil-linux-x64": "0.1.0-rc.14",
-    "@zseven-w/dsh-openpencil-win32-arm64": "0.1.0-rc.14",
-    "@zseven-w/dsh-openpencil-win32-x64": "0.1.0-rc.14"
+    "@darkskygit/dsh-openpencil-darwin-arm64": "0.1.0-rc.14",
+    "@darkskygit/dsh-openpencil-darwin-x64": "0.1.0-rc.14",
+    "@darkskygit/dsh-openpencil-linux-arm64": "0.1.0-rc.14",
+    "@darkskygit/dsh-openpencil-linux-x64": "0.1.0-rc.14",
+    "@darkskygit/dsh-openpencil-win32-arm64": "0.1.0-rc.14",
+    "@darkskygit/dsh-openpencil-win32-x64": "0.1.0-rc.14"
   },
   "devDependencies": {
     "@deepseek-ai/cordis": "~4.0.4",

@@ -1,0 +1,46 @@
+//! `jian-ops-schema` — canonical types + JSON Schema for Jian `.op` files.
+
+pub mod app;
+pub mod breakpoint;
+pub mod compat;
+pub mod constraints;
+pub mod conversion;
+pub mod design_md;
+pub mod document;
+pub mod error;
+pub mod events;
+pub mod expression;
+pub mod font_plan;
+pub mod gestures;
+pub mod image_table;
+pub mod image_thumbs;
+pub mod lifecycle;
+pub mod logic_module;
+pub mod navigation;
+pub mod node;
+pub mod pack;
+pub mod page;
+pub mod page_ids;
+pub mod promote;
+pub mod routes;
+pub mod screen_projection;
+pub mod semantics;
+pub mod sizing;
+pub mod state;
+pub mod state_override;
+pub mod style;
+pub mod variable;
+pub mod version;
+
+pub use compat::load_str;
+pub use design_md::{DesignMdColor, DesignMdSpec, DesignMdTypography};
+pub use document::PenDocument;
+pub use error::{LoadResult, LoadWarning, OpsResult, OpsSchemaError};
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn crate_compiles() {
+        assert_eq!(2 + 2, 4);
+    }
+}

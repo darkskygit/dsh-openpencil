@@ -1,0 +1,55 @@
+//! `jian-core` — Jian UI framework core.
+//!
+//! This crate provides the three primary abstractions the rest of Jian builds on:
+//!
+//! - [`document`] — the runtime representation of a loaded `.op` file.
+//! - [`signal`] — fine-grained reactivity primitives (Signals + Effects).
+//! - [`scene`] — a resolved render-ready view of the document.
+//!
+//! It also defines two extension traits that host crates implement:
+//!
+//! - [`render::RenderBackend`] — how to turn the scene graph into pixels.
+//! - [`logic::LogicProvider`] — how to execute Tier 3 logic modules (reserved for L4).
+
+pub mod action;
+pub mod action_surface;
+pub mod anim;
+pub mod binding;
+pub mod capability;
+pub mod color;
+pub mod cursor;
+pub mod document;
+pub mod effect;
+pub mod error;
+pub mod expression;
+pub mod geometry;
+pub mod gesture;
+pub mod layout;
+pub mod logic;
+pub mod render;
+pub mod runtime;
+pub mod scene;
+pub mod screens;
+pub mod scroll;
+pub mod signal;
+pub mod spatial;
+pub mod startup;
+pub mod state;
+pub mod text_input;
+pub mod text_wrap;
+pub mod value;
+pub mod viewport;
+pub mod widget_state;
+
+pub use binding::{BindingEffect, DeferredBindingQueue};
+pub use cursor::CursorHint;
+pub use error::{CoreError, CoreResult};
+pub use runtime::Runtime;
+
+#[cfg(test)]
+mod sanity {
+    #[test]
+    fn smoke() {
+        assert_eq!(2 + 2, 4);
+    }
+}

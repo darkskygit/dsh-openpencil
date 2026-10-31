@@ -1,4 +1,3 @@
-import { spawnSync } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { openPencil, platforms, projectRoot } from './platforms.mjs'
@@ -39,17 +38,13 @@ const cargoVersion = /^\[workspace\.package\][\s\S]*?^version = "([^"]+)"/mu.exe
 if (cargoVersion !== openPencil.version) {
   throw new Error(`platforms.json pins OpenPencil ${openPencil.version}, vendor Cargo.toml reports ${cargoVersion ?? 'nothing'}`)
 }
-const revision = git(['-C', join(projectRoot, 'vendor', 'openpencil'), 'rev-parse', 'HEAD']).trim()
-if (revision !== openPencil.revision) {
-  throw new Error(`platforms.json pins OpenPencil ${openPencil.revision}, submodule is ${revision}`)
+// The vendored tree is committed instead of gitlinked, so the catalog is
+// checked against a recorded revision marker rather than a submodule HEAD.
+const recorded = (await readFile(join(projectRoot, 'vendor', 'openpencil.revision'), 'utf8')).trim()
+if (recorded !== openPencil.revision) {
+  throw new Error(`platforms.json pins OpenPencil ${openPencil.revision}, vendored tree records ${recorded}`)
 }
 process.stdout.write(requested + '\n')
-
-function git(args) {
-  const result = spawnSync('git', args, { cwd: projectRoot, encoding: 'utf8' })
-  if (result.status !== 0) throw new Error(`git ${args.join(' ')} failed:\n${result.stderr || result.stdout}`)
-  return result.stdout
-}
 
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&')

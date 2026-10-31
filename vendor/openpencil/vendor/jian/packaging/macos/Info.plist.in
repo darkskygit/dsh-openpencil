@@ -1,0 +1,110 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  cargo-bundle merges this Info.plist into the generated `.app`.
+  The release pipeline replaces `@@VERSION@@` before invoking
+  `cargo bundle`. Drop into `crates/jian-cli/Info.plist` as a
+  symlink or copy at build time; cargo-bundle picks up
+  `<crate-dir>/Info.plist` automatically.
+
+  Today's plist ships `CFBundleDocumentTypes` for `.op` (Finder
+  double-click → Open Files routes the path to the running app
+  via `application:openURLs:`). `CFBundleURLTypes` for `jian://`
+  is deferred — see the inline comment further down for the
+  Plan 8 §C5 rationale.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>Jian</string>
+    <key>CFBundleDisplayName</key>
+    <string>Jian</string>
+    <key>CFBundleIdentifier</key>
+    <string>dev.jian.cli</string>
+    <key>CFBundleVersion</key>
+    <string>@@VERSION@@</string>
+    <key>CFBundleShortVersionString</key>
+    <string>@@VERSION@@</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleExecutable</key>
+    <string>jian</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>10.15</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <!--
+      `CFBundleURLTypes` for `jian://` is intentionally STILL NOT
+      registered (Plan 8 §T8 / C5 — codex round 1 HIGH).
+      `crates/jian-host-desktop/src/app_delegate.rs` ships only the
+      *trait-routing seam* (`install_handler` / `dispatch_url`); the
+      real NSApplicationDelegate Apple-Event subclass that forwards
+      URLs into `dispatch_url` lands alongside macOS-release CI.
+      Registering the scheme without that subclass would route deep
+      links into a black hole — the OS hands the URL to the bundle,
+      the bundle has no `application:openURLs:` listener, and the
+      URL drops on the floor. Re-add this block once the subclass
+      ships AND single-instance forwarding is in place.
+    -->
+    <!--
+      Sparkle auto-updater (Plan 8 §T9 / C8) — keys reserved but the
+      feed is not enabled yet. The release script substitutes
+      `@@SUFEED_URL@@` and `@@SU_PUBLIC_ED_KEY@@` only on the
+      tagged-release path; nightly / dev builds ship without these
+      keys and the host's update path stays disabled. The actual
+      Sparkle.framework integration (CocoaPods or SPM dep on
+      `Sparkle/Sparkle 2.x`) is a per-platform CI follow-up; until
+      it lands, these keys are inert metadata for downstream tooling
+      to consume.
+    -->
+    <key>SUFeedURL</key>
+    <string>@@SUFEED_URL@@</string>
+    <key>SUPublicEDKey</key>
+    <string>@@SU_PUBLIC_ED_KEY@@</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
+    <key>SUScheduledCheckInterval</key>
+    <integer>86400</integer>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>Jian / OpenPencil document</string>
+            <key>CFBundleTypeRole</key>
+            <string>Editor</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>dev.jian.op</string>
+            </array>
+            <key>LSHandlerRank</key>
+            <string>Owner</string>
+        </dict>
+    </array>
+    <!--
+      `dev.jian.op-pack` is intentionally not exported either:
+      `DesktopHost::open_file` reads its argument as a raw `.op`
+      JSON document and would fail on a ZIP pack. `jian unpack` is
+      a separate command for now; restore the type declaration when
+      `open_file` learns to detect the `op.pack` extension and
+      unpack transparently.
+    -->
+    <key>UTExportedTypeDeclarations</key>
+    <array>
+        <dict>
+            <key>UTTypeIdentifier</key>
+            <string>dev.jian.op</string>
+            <key>UTTypeDescription</key>
+            <string>Jian / OpenPencil design file</string>
+            <key>UTTypeConformsTo</key>
+            <array><string>public.data</string></array>
+            <key>UTTypeTagSpecification</key>
+            <dict>
+                <key>public.filename-extension</key>
+                <array><string>op</string></array>
+            </dict>
+        </dict>
+    </array>
+</dict>
+</plist>

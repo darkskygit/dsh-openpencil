@@ -1,0 +1,346 @@
+<div align="center">
+
+  <img src="./assets/logo.png" alt="Jian logo" width="128" />
+
+# Jian · 简
+
+### *One `.op` file. A native window. AI in the loop. Pure Rust.*
+
+Jian loads a single declarative document and turns it into a real, interactive,
+hot-reloading, AI-controllable application — without a JS runtime, without a
+DOM, without an Electron tax.
+
+![License](https://img.shields.io/badge/license-MIT-blue.svg)
+![Rust](https://img.shields.io/badge/rust-1.78%2B-orange.svg)
+![Tests](https://img.shields.io/badge/tests-passing-brightgreen.svg)
+![Workspace](https://img.shields.io/badge/version-0.0.1-purple.svg)
+![Platforms](https://img.shields.io/badge/macOS%20%7C%20Linux%20%7C%20Windows-supported-success)
+![MCP](https://img.shields.io/badge/MCP-rmcp%20stdio-9cf)
+![Cold start](https://img.shields.io/badge/cold%20start-typed%20stages-success)
+![Status](https://img.shields.io/badge/status-pre--release-yellow.svg)
+
+[**Quick start**](#-quick-start) ·
+[**Why Jian?**](#-why-jian) ·
+[**Architecture**](#-architecture) ·
+[**AI surface**](#-ai-action-surface) ·
+[**Roadmap**](#-roadmap)
+
+</div>
+
+---
+
+## ✨ Highlights
+
+- 🦀 **Pure-Rust runtime** — `winit` · `skia-safe` · `taffy` · `rstar`. No JS, no DOM, no V8.
+- 📄 **One file is the app** — state, layout, bindings, events, AI capabilities — all in `.op`.
+- ⚡ **Solid-style reactivity** — `Signal<T>` + `Effect`, fine-grained, single-threaded, allocation-light.
+- 🎯 **Real gesture arena** — Tap · LongPress · Swipe · Scroll · multi-pointer **Pinch & Rotate**, with bubble-style hit dispatch.
+- 🎨 **Pixel-stable rendering** — Skia raster, per-corner radii, gradients, shadows, image cache, Lucide icons; opt-in `textlayout` for full Paragraph shaping.
+- 🤖 **AI-native by design** — every interactive node derives a `<scope>.<slug>_<hash4>` action (Tap stays unprefixed; DoubleTap / LongPress / Submit / Set / Open / LoadMore / Swipe* / Confirm / Dismiss carry verb prefixes); `jian dev --mcp` exposes them over a real MCP stdio server.
+- 🚀 **Typed cold-start pipeline** — three-stage `StartupDriver` (`DataPath` pre-window · `Visual` first-redraw · `Background` post-paint), per-platform budget tests, `jian perf startup` + `jian perf compare` regression gate, and AOT initial-layout pre-bake via `jian pack --aot`.
+- 🔁 **Hot reload that keeps state** — `jian dev app.op` reparses on save without losing your counter / form / scroll position.
+- 🛡️ **Capability-gated I/O** — declared up-front in `app.capabilities`; the gate refuses anything the document didn't ask for.
+- 🤝 **Agent Shell Protocol — two surfaces** — `jian-asp` ships a wide **dev** surface (Tap / Type / Scroll / Swipe / Find / Inspect / Snapshot / Audit + state writes) for AI-driven UI testing AND a lean **prod** surface (Handshake / ListActions / Tap / Type / Scroll / Swipe / Exit) for token-efficient AI driving against shipping apps — `jian player --asp <path>` over a Unix socket / Windows Named Pipe with a real per-user DACL, file-based token revoke + rotate, `--asp-permission <observe|act|full>`, and a `~3.65×` smaller wire than MCP on a 50-action screen. Each surface is a separate cargo feature (`dev-asp` / `prod-asp`); CI asserts neither leaks into a release build that didn't ask for it.
+- 🧪 **`cargo test --workspace` is the source of truth** — full matrix covers macOS / Linux / Windows × {default, dev-asp, prod-asp, textlayout} + a per-platform `startup-budget` regression gate (15% threshold, 1 ms noise floor).
+
+## 🎬 Hello, Counter
+
+Jian apps are JSON. This one renders, lays out, hit-tests, and is hot-reloadable
+the moment you save:
+
+```jsonc
+{
+  "formatVersion": "1.0",
+  "id": "demo.counter",
+  "app": { "name": "Counter", "version": "0.1.0", "id": "demo.counter" },
+  "state":    { "count": { "type": "int", "default": 0 } },
+  "children": [{
+    "type": "frame", "id": "root", "width": 480, "height": 320,
+    "fill": [{ "type": "solid", "color": "#f5f7fa" }],
+    "children": [
+      { "type": "text", "id": "label", "x": 40, "y": 60,
+        "width": 400, "height": 60, "fontSize": 40, "fontWeight": 700,
+        "content": "Count: 0",
+        "bindings": { "content": "`Count: ${$app.count}`" } },
+
+      { "type": "rectangle", "id": "btn", "x": 140, "y": 180,
+        "width": 200, "height": 64, "cornerRadius": 12,
+        "fill": [{ "type": "solid", "color": "#1e88e5" }],
+        "events": { "onTap": [{ "set": { "$app.count": "$app.count + 1" } }] }
+      }
+    ]
+  }]
+}
+```
+
+```bash
+cargo run -p jian -- dev counter.op             # live-reload window
+cargo run -p jian --features mcp -- dev counter.op --mcp   # + AI over MCP
+```
+
+> No build step. No bundler. No transpiler. The CLI parses the file, builds
+> the runtime, hands it to a real `winit` window, and starts watching the
+> file for saves.
+
+## 🤔 Why Jian?
+
+|                   | Electron / Tauri + React | Flutter / Compose   | **Jian**                                |
+| ----------------- | ------------------------ | ------------------- | --------------------------------------- |
+| Distribution unit | bundled JS / wasm        | compiled binary     | **single `.op` JSON**                   |
+| Reactive model    | VDOM diff                | rebuild + keys      | **fine-grained signals**                |
+| Authoring loop    | bundle → reload          | rebuild → restart   | **save → reparse, state preserved**     |
+| AI integration    | bolt-on per app          | bolt-on per app     | **derived MCP surface, every release**  |
+| Renderer          | webview / Impeller       | Skia / Skia         | **Skia (raster today, GPU staged)**     |
+| Runtime cost      | JS engine + DOM          | Dart VM + framework | **Rust binary, ~1 process**             |
+
+Jian sits where "fast tools" meet "fast UIs": you ship the runtime once, then
+distribute applications as **content** (`.op` files), not as bundles. The same
+runtime is staged to embed into the OpenPencil canvas (via `napi-rs`) and
+into the browser (via WASM) — the document is portable, the host is not.
+
+## 🏗 Architecture
+
+```text
+                    ┌───────────────────────┐
+                    │   .op   (Pen Schema)  │
+                    └───────────┬───────────┘
+                                │ parse
+                                ▼
+   ┌──────────────────────────────────────────────────────────┐
+   │ jian-ops-schema  ── Pen Schema v1, JSON Schema + ops.ts  │
+   └──────────────────────────────────────────────────────────┘
+                                │
+                                ▼
+   ┌──────────────────────────────────────────────────────────┐
+   │ jian-core                                                │
+   │  • Runtime  • Signal/Effect  • StateGraph (6 scopes)     │
+   │  • Tier-1 expressions  • Tier-2 Action DSL               │
+   │  • Capability gate  • R-tree spatial  • Gesture arena    │
+   │  • taffy flexbox  • MeasureBackend (estimate | Skia)     │
+   └──────┬───────────────────────────────┬───────────────────┘
+          │                               │
+          ▼                               ▼
+   ┌────────────────┐            ┌──────────────────────────┐
+   │ jian-skia      │            │ jian-action-surface      │
+   │  raster + GPU* │            │  derive · list · execute │
+   │  paragraph⁺    │            │  state-gate · audit      │
+   └────────┬───────┘            │  rate-limit · MCP (rmcp) │
+            │                    └────────────┬─────────────┘
+            ▼                                 ▼
+   ┌──────────────────────────────────────────────────────────┐
+   │ jian-host-desktop  (winit · softbuffer · muda · arboard) │
+   └────────────────────────────┬─────────────────────────────┘
+                                │
+                                ▼
+   ┌──────────────┐    ┌────────────────┐    ┌──────────────┐
+   │  jian player │    │  jian dev      │    │ jian dev     │
+   │  (window)    │    │  (+hot reload) │    │  --mcp (+AI) │
+   └──────────────┘    └────────────────┘    └──────────────┘
+```
+
+\* GPU surface factories (Metal / D3D12 / GL / Vulkan) are scaffolded
+behind feature flags — raster + softbuffer covers all three desktop OSes
+today.
+⁺ Real `Paragraph` shaping is opt-in via the `textlayout` feature; a 1 px
+drift gate pins the estimate path against it on every CI run.
+
+## 🚀 Quick Start
+
+```bash
+# 1. clone + build
+git clone https://github.com/zseven-w/jian && cd jian
+cargo build --release
+
+# 2. scaffold
+cargo run -p jian -- new my-app && cd my-app
+
+# 3. validate a document
+cargo run -p jian -- check app.op
+
+# 4. run it in a real window
+cargo run -p jian -- player app.op
+
+# 5. author loop — hot-reload on every save, runtime state survives
+cargo run -p jian -- dev app.op
+
+# 6. AI in the loop — same as `dev`, plus stdio MCP for tools/list + tools/call
+cargo run -p jian --features mcp -- dev app.op --mcp
+```
+
+Embedding the runtime directly:
+
+```rust
+use jian_core::Runtime;
+
+let mut rt = Runtime::new();
+rt.load_str(&std::fs::read_to_string("app.op")?)?;
+rt.build_layout((800.0, 600.0))?;
+rt.rebuild_spatial();
+
+let hits = rt.spatial.hit(jian_core::geometry::point(50.0, 50.0));
+```
+
+Plug real font metrics in:
+
+```rust
+use jian_skia::SkiaMeasure;
+rt.build_layout_with(SkiaMeasure::new(), (800.0, 600.0))?;
+```
+
+## 📦 Crates
+
+| Crate                     | What it does |
+| ------------------------- | ------------ |
+| **`jian-ops-schema`**     | Canonical Pen Schema for `.op` / `.op.pack`. Round-trips legacy v0.x byte-for-byte; ships v1.0 additive Jian extensions. Generates `bindings/ops.schema.json` (Draft 2020-12) + `bindings/ops.ts` consumed by OpenPencil and other editors. Hosts the `pack::initial_layout` AOT format (Plan 19 D1) + `font_plan` codepoint scanner (D2). |
+| **`jian-core`** | Runtime kernel. `Runtime` composition root, `Signal<T>` + `Effect`, `StateGraph` (`$app` / `$page` / `$self` / `$route` / `$storage` / `$vars`), Tier-1 expressions, Tier-2 Action DSL, capability gate, gesture arena, taffy flexbox, R-tree spatial index, `MeasureBackend` trait, **typed three-stage `StartupDriver`** + `HostAgnosticBootstrap` for the DataPath cold-start phases. |
+| **`jian-skia`** | `RenderBackend` over `skia-safe`. Raster + per-corner radii + linear gradients + shadows + image cache + Lucide icons. Optional `textlayout` feature wires real `Paragraph` shaping pinned by a 1 px drift gate. |
+| **`jian-host-desktop`** | `winit` 0.30 + `softbuffer` 0.4 host. Scale-factor-aware pointer / key translators, in-memory router + storage, `arboard` clipboard, `muda` native menus, binding-aware scene walker. **Visual-stage bootstrap** runs Splash / FirstFrame / Present / EventPumpReady inside the first `RedrawRequested` after `resumed()` (Plan 19 capstone B2.2 / B4). Per-platform deep-link trait-routing seams ship in `app_delegate` (macOS) / `win_deeplink` (Windows). |
+| **`jian-asp`** | Agent Shell Protocol — NDJSON over an arbitrary byte stream. Two opt-in cargo features: `dev-asp` (full debug verb set, including `find` / `inspect` / `snapshot` / `audit` / state writes) and `prod-asp` (lean production surface — `handshake` / `list_actions` / `tap` / `type` / `scroll` / `swipe` / `exit`, with selectors restricted to `list_actions` ids and the `aiHidden` filter applied). Listener transports: stdio, Unix domain socket (`0700` parent / `0600` socket, refuses TCP / `host:port`), Windows Named Pipe (protected DACL, calling user's SID only). `jian player --asp <path>` wires the live runtime via an `AspBridge` (mpsc + sync-reply rendezvous; drained in `about_to_wait`). File-based token validator supports operator revoke (`rm <token>`) + rotate (`echo new > <token>`) without restarting the player. Plan 18 + post-audit hardening. |
+| **`jian-action-surface`** | AI Action Surface (spec §3–§10). Derives stable `<scope>.<verb>_<slug>` actions, evaluates `RuntimeStateGate` against live bindings, dispatches synthesised pointer events, and serves `list_available_actions` / `execute_action` over an `rmcp` stdio bridge. Audit + rate limit + concurrency caps + swipe throttle baked in. |
+| **`jian` (CLI)** | `check` · `pack [--aot] [--aot-viewport WxH]` · `unpack` · `new` · `player` · `dev` (+`--mcp`) · `perf startup [--runs N] [--format json]` · `perf compare BASELINE CURRENT [--threshold 0.15] [--noise-floor-ms 1.0] [--format markdown]`. |
+
+## 🤖 AI Action Surface
+
+Jian advertises a **derived, gated, audited** action surface to any AI client.
+Two delivery channels share the same `<scope>.<verb>_<slug>_<hash4>` action
+ids (so a client can swap channels without re-learning names):
+
+```bash
+# MCP — wide schemas per tool, ~9.2 KiB per `tools/list` on a 50-action screen.
+cargo run -p jian --features mcp -- dev app.op --mcp
+
+# ASP prod — flat `[{id, events}]` rows, ~2.5 KiB per `list_actions` (3.65×
+# smaller); local-only Unix socket / Named Pipe; explicit revoke + rotate.
+cargo run -p jian --features prod-asp -- player app.op --asp auto
+# Then point your agent at the printed socket path + `<socket>.token`.
+```
+
+Under the hood, every interactive node becomes a tool. Names follow
+`<scope>.<slug>_<hash4>` — `<hash4>` is four hex chars derived from
+`(node.id, BUILD_SALT)` and is dropped when the author sets
+`semantics.aiName`:
+
+| Node                                                       | Action name shape                          |
+|------------------------------------------------------------|--------------------------------------------|
+| `events.onTap` on `<button id="signup-cta">`               | `home.signup_cta_a3f7`                     |
+| `bindings["bind:value"] = $state.email` on `<text-input>`  | `home.set_email_b012`                      |
+| `events.onScroll` / `onReachEnd` on `<list>`               | `home.load_more_c4d5`                      |
+| `events.onPanStart` + `onPanEnd` on a card                 | `home.swipe_{left,right,up,down}_e6f7` (4) |
+| `events.onSubmit` on a `<form>`                            | `home.submit_<slug>_<hash4>`               |
+| `route = { push: "/checkout" }` on a link                  | `home.open_checkout_<hash4>`               |
+| `semantics.aiName = "checkout"` on the same link           | `home.checkout` (no `_<hash4>`)            |
+
+- **Static availability** comes from the schema (`AvailabilityStatic::Available`
+  / `ConfirmGated` / `StaticHidden`). `confirm:` / `fetch DELETE|POST` /
+  `storage_clear` / `storage_wipe` flip a node to `ConfirmGated` until the
+  author opts back in with `semantics.aiHidden: false`.
+- **Live state-gate** (`RuntimeStateGate`) drops actions whose source node or
+  any ancestor evaluates `bindings.visible == false` or
+  `bindings.disabled == true` against the live `StateGraph` — so the AI
+  never sees an action it would then bounce off `state_gated` on execute.
+- **Authorship overrides** (`aiAliases`) survive both `list` and `execute`;
+  alias hits are audited with `alias_used: true` and stay transparent to
+  the client.
+- **Phase 1 dispatch coverage**: Tap / Confirm / Dismiss / SetValue / OpenRoute
+  are wired against the live `Runtime`. DoubleTap / LongPress / Submit /
+  Swipe* / LoadMore are listed in `list_available_actions` but currently
+  return `ExecutionFailed(handler_error)` until their host-driver paths
+  land.
+- **Pointer dispatch** synthesises a real `PointerDown` + `PointerUp` at the
+  layout centre of the source node — the same code path a human cursor takes.
+- **Audit log + rate limit (10 calls/sec/session) + same-action concurrency
+  cap + swipe 400 ms same-direction throttle** are first-class.
+- The `RuntimeDispatcher` wraps `&mut Runtime`, while a `SinkDispatcher` keeps
+  unit tests free of `winit`.
+
+> Build-time stable names: the `_<hash4>` suffix comes from `BUILD_SALT`
+> baked in by `crates/jian-core/build.rs` (priority: `JIAN_BUILD_SALT`
+> env override → `<git-short-16>-<cargo-semver>` (e.g.
+> `1a2b3c4d5e6f7890-0.0.1`) → `<cargo-semver>` alone). `jian dev --mcp`
+> prints the resolved source string on attach so prompt caches can key
+> on it.
+
+See [`crates/jian-action-surface/README.md`](crates/jian-action-surface/README.md)
+and [`openpencil-docs/superpowers/notes/2026-04-24-ai-action-surface-client-guide.md`](../openpencil-docs/superpowers/notes/2026-04-24-ai-action-surface-client-guide.md).
+
+## 🛠 Development
+
+```bash
+cargo test --workspace                                # default features, 0 failures
+cargo test --workspace --all-features                 # adds mcp + textlayout
+cargo test -p jian-asp -p jian --features dev-asp     # full debug ASP surface
+cargo test -p jian-asp -p jian --features prod-asp    # lean prod ASP surface (incl.
+                                                       # the 50-action byte-budget bench
+                                                       # and prod-acceptance suite)
+cargo clippy --all-targets --all-features -- -D warnings
+cargo fmt --check
+cargo run -p jian-ops-schema --bin export_schema
+cargo run -p jian-ops-schema --features export-ts --bin export_ts
+
+# Cold-start instrumentation
+cargo run --release -p jian -- perf startup app.op --runs 20
+cargo run --release -p jian -- perf startup app.op --runs 20 --format json > current.json
+cargo run --release -p jian -- perf compare baseline.json current.json \
+    --threshold 0.15 --noise-floor-ms 1.0 --label macos-aarch64
+
+# AOT pre-bake (writes aot/initial_layout.bin + aot/default_state.bin
+# into the .op.pack — runtime preloads both to skip ComputeFirstLayout
+# and re-seed StateGraph defaults from the canonical snapshot)
+cargo run --release -p jian -- pack --aot --aot-viewport 800x600 app.op out.op.pack
+```
+
+CI runs on macOS / Linux / Windows; the `textlayout` job needs Python 3.11
+because Skia's text shaping build pulls it in. The `startup-budget` workflow
+collects per-platform `jian perf startup` JSON on every push and gates PRs
+against `main`'s most recent green baseline (15% regression threshold,
+1 ms noise floor, single rolling PR comment with the diff table).
+
+## 🗺 Roadmap
+
+**Shipped in `v0.0.1`:**
+
+- ✅ Plan 1 ops-schema · Plan 2 core · Plan 3 Tier-1 expressions · Plan 4 Tier-2 Action DSL
+- ✅ Plan 5 gesture arena (Tap / LongPress / Swipe / Scroll + multi-pointer Pinch & Rotate)
+- ✅ Plan 6 capability gate (dev-asp gated)
+- ✅ Plan 7 `jian-skia` (raster + gradients + image cache + `ParagraphBuilder` feature)
+- ✅ Plan 8 desktop host (winit / softbuffer / muda menu spec)
+- ✅ Plan 9 CLI (eight subcommands incl. `dev` hot-reload + `perf startup` / `perf compare`)
+- ✅ Plan 22 `jian-action-surface` Phase 1 + MCP stdio server (`rmcp`) + `jian dev --mcp`
+- ✅ Plan 18 Agent Shell Protocol — full dev verb set (Tap / Type / Scroll / Swipe / Find / Inspect / Snapshot / Audit + state writes via `dev-asp`) AND prod surface (`prod-asp`: handshake / list_actions / tap / type / scroll / swipe / exit) wired into `jian player --asp <path>` over a Unix socket / Windows Named Pipe with explicit user-SID DACL, file-based token revoke + rotate, `--asp-permission <observe|act|full>`, and a 3.65× smaller wire shape than MCP on a 50-action screen. Codex-reviewed across C0–C6 + post-audit fixes; `asp-features × {linux,macos,windows} × {dev-asp,prod-asp}` matrix runs on every push.
+- ✅ Plan 19 cold-start capstone — typed three-stage `StartupDriver` (`DataPath` / `Visual` / `Background`), `HostAgnosticBootstrap` for DataPath, visual-stage runner for the first `RedrawRequested` after `resumed()`, `jian player` two-stage launch with unified-launch-epoch report timeline
+- ✅ Plan 19 D1 `.op.pack` AOT initial-layout writer + reader (`OPL1` little-endian SoA format, `jian pack --aot`) **plus runtime preload** (`LayoutEngine::preload_initial` + `HostAgnosticBootstrap::install_data_path_with_aot` short-circuit `ComputeFirstLayout` when coverage is total + viewport bit-matches); AOT default-state writer + reader (`OPS1` framed canonicalised JSON for app/page/self/route/storage/vars scopes; `StateGraph::dump_default_state`/`restore_default_state` reuse Signal slot identity so binding subscribers survive); **AOT expressions writer + reader (Plan 19 D2 — `OPE1` little-endian frame with wire-stable `PackedOpCode` u8 tags 0..=32 mirroring every `jian_core::expression::bytecode::OpCode` variant; `Runtime::warm_expression_cache` populates the cache from `DeferredBindingQueue` before dump; `install_data_path_with_aot_full` runs `PackedChunk::verify` (string/scope index bounds + forward-only jumps in [0, ops.len()]) before `ExpressionCache::install_precompiled`; bootstrap drops the whole snapshot to JIT on verify failure; VM has `checked_sub`/`checked_mul` defense in depth so a malformed AOT chunk that bypasses verify still surfaces as a `vm_bug` diagnostic instead of panicking)**; D2 font subsetter wiring (`FontPlan::scan_subtrees` populates `BootstrapHandles::take_core_font_plan`); D3 per-platform startup budget tests; D4 `jian perf compare` CI diff bot + 15% threshold gate + single rolling PR comment
+- ✅ Plan 8 §T7 native menu bar · §T8 deep-link trait-routing seam (`app_delegate.rs` macOS / `win_deeplink.rs` Windows) **plus macOS `kAEGetURL` Apple-Event receiver** (`apple_event_receiver.rs` — JianAppleEventReceiver `NSObject` subclass registered with `NSAppleEventManager`; main-thread asserted via `pthread_main_np`; `extern "C"` IMP wrapped in `catch_unwind` + `mem::forget(payload)` + panic-safe `writeln!(io::stderr(), …)` so handler panics never cross the FFI frame) **AND Windows `WM_COPYDATA` receiver + named-mutex single-instance** (`win_deeplink_receiver.rs` — `Local\` namespace mutex+event paired with HWND_MESSAGE session scoping; `try_acquire_singleton` returns `Primary(Guard)` / `Secondary`; `install_receiver_window(&Guard)` registers `JianDeepLinkReceiver` class via `OnceLock<Result<…>>`-memoised result; `forward_url_to_primary` waits on the ready event then `SendMessageTimeoutW(SMTO_BLOCK, 5s)` returning typed `ForwardOutcome::{Delivered, NoPeer, SendTimedOut, SendFailed{last_error}, PrimaryRejected}`; receiver validates `lpData!=NULL`, `cbData ≤ 4 KiB`, alignment, `dwData == 'JDL1'` tag); cross-platform `deeplink::install_deeplink_handler` shim · §T9 updater trait + `selfupdate` feature · §T10 packaging configs (`cargo bundle` macOS .app · `cargo wix` Windows MSI — URL-scheme registration uncommented and pointed at `jian.exe player "%1"` so `jian://` clicks route into `try_acquire_singleton`'s forward-and-exit path · `cargo deb` + AppImage Linux · `.icns` generator · Sparkle appcast template · AppImageUpdate metadata)
+- ✅ §3.3 CJK transliteration · §3.4 collision detection · §6.3 swipe throttle · §8.1 AuditLog
+- ✅ §3.1 `BUILD_SALT` build-time injection (`crates/jian-core/build.rs` — env override → git+semver → semver fallback; mac `.git` worktree resolved; FNV-1a double-hash → 16 bytes)
+- ✅ Bubble-style event dispatch · binding-aware scene walker
+- ✅ macOS Dock icon at runtime via `NSApp.setApplicationIconImage:` (`set_macos_dock_icon_from_png`) so unbundled `jian player` / `jian dev` (or any host that calls `DesktopHost::with_icon`) shows the schema's `app.icon` instead of the default exec icon
+- ✅ Action Surface protocol docs — `crates/jian-action-surface/README.md` (embedding + threat-model anchors) + `openpencil-docs/superpowers/notes/2026-04-24-ai-action-surface-client-guide.md` (Claude Desktop / raw-stdio Python clients, error-handling policy, build-salt awareness)
+
+**Up next (each warrants its own session):**
+
+- ✅ Plan 19 D2 follow-up — typed doc-walk extractor (`jian_core::expression::warm_cache_from_document`) now compiles every expression-typed schema field into the AOT cache: per-node `bindings` maps + `NumberOrExpression`/`BoolOrExpression` union variants + the 21 typed event hooks + the 4+4+2 app/page/node lifecycle action lists. Action bodies recurse structurally with a `PushScopeRef + Return` post-compile filter to drop bare-id pollution; `event_handler_lists_match_struct_field_count` exhaustively destructures `EventHandlers` so any future hook addition forces a compile error in the test. Codex-reviewed across 5 rounds (1 BLOCK + 6 CONCERNs + 2 NITs all closed).
+- ✅ Plan 8 §T8 follow-up A — `RuntimeDeepLinkHandler` buffering DeepLinkHandler installed on every platform (Apple-Event registry / Windows pipe-listener / Linux argv); `DesktopHost.pending_deeplinks` queue drained once per `about_to_wait` tick via `dispatch_url_into_runtime` (`nav.push` + per-query-key `state.route_set`). Drain-time `expected_app_id` filter resolved from `runtime.document.schema.app.id` rejects OS-level cross-app misroutes; empty `app.id` collapses to `None` so unset ids don't silently drop every URL.
+- ✅ Plan 8 §T8 follow-up B — Windows transport upgraded from `FindWindowExW`+`WM_COPYDATA` (class-name peer auth — same-session attackers could intercept) to per-user named pipe `\\.\pipe\jian-deeplink-<user_sid>` with explicit user-SID DACL `D:P(A;;GA;;;<sid>)` (mirror of `jian-asp::transport::named_pipe`'s security model). `PIPE_REJECT_REMOTE_CLIENTS` blocks off-box peers; `FILE_FLAG_FIRST_PIPE_INSTANCE` pairs with the named-mutex singleton for exactly-one-listener invariant. Listener thread reads URL lines from the pipe and `PostMessageW`s the receiver HWND with `WM_USER_DEEPLINK_FORWARD` carrying a heap-leaked `Box<String>` pointer; receiver `WindowProc` recovers the Box and feeds the URL into `dispatch_url`. Cold-start message-pump latency gap (round-1 known limitation) eliminated — listener thread runs independently of main-thread cold-start work. Codex-reviewed across 4 rounds; final pass CLEAN.
+- ⏳ Plan 8 / 11 / 12 — GPU surface factories (Metal · D3D12 · OpenGL / WebGL · Vulkan); each backend warrants its own session against real hardware (CAMetalLayer drawable lifecycle, IDXGI swapchain present cadence, GL context current, Vulkan surface/swapchain). Existing `surface/{metal,d3d,gl}.rs` skeletons return `Err("…not yet implemented…")` with full implementation outlines.
+- ⏳ Plan 11 — OpenPencil canvas swap (replace `pen-renderer` via `napi-rs`)
+- ⏳ Plan 13 — Electron → Tauri migration
+- ⏳ Plan 14 — `pen-mcp` Rust port (byte-level parity gate)
+- ⏳ Plan 15 — `pen-ai-skills` Rust + 3-backend split (MCP / ActionSurface / ASP)
+- ⏳ Plan 16 — `pen-codegen` Rust (9 codegen targets)
+- ⏳ Plan 17 — `pen-figma` Rust + Stage E/F/G
+- 🔒 Plan 24 — `.op.pack` protect Phase 2 (calendar-locked behind ≥ 3 months Phase 1 production)
+
+## 📚 Spec
+
+The full design lives next to the code:
+
+- Specs: [`openpencil-docs/superpowers/specs/`](../openpencil-docs/superpowers/specs/)
+- Plans: [`openpencil-docs/superpowers/plans/`](../openpencil-docs/superpowers/plans/) (`2026-04-17-jian-plan-*` and `2026-04-2x-jian-*`)
+
+## 📜 License
+
+MIT — see [LICENSE](LICENSE).
+
+<div align="center">
+<sub>built with 🦀, <code>winit</code>, <code>skia-safe</code>, <code>taffy</code>, and one stubborn <code>.op</code> file.</sub>
+</div>

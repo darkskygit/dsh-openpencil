@@ -5,7 +5,7 @@ This distribution includes the following third-party components.
 ## OpenPencil 0.8.5
 
 - Files: `lib/viewer-assets/sdk.js`, `lib/viewer-assets/op_web_sdk_bg.wasm`
-- Platform packages: `@zseven-w/dsh-openpencil-<platform>` distribute the native headless `op-host-web-server`, its matching editor web bundle, and CanvasKit directory together
+- Platform packages: `@darkskygit/dsh-openpencil-<platform>` distribute the native headless `op-host-web-server`, its matching editor web bundle, and CanvasKit directory together
 - Source: https://github.com/ZSeven-W/openpencil
 - License: MIT
 
@@ -37,7 +37,7 @@ SOFTWARE.
 
 ## CanvasKit (`canvaskit-wasm` 0.40.0)
 
-- Files: `lib/viewer-assets/canvaskit/canvaskit.js`, `lib/viewer-assets/canvaskit/canvaskit.wasm`, and the matching CanvasKit directory distributed in each `@zseven-w/dsh-openpencil-<platform>` package
+- Files: `lib/viewer-assets/canvaskit/canvaskit.js`, `lib/viewer-assets/canvaskit/canvaskit.wasm`, and the matching CanvasKit directory distributed in each `@darkskygit/dsh-openpencil-<platform>` package
 - Source: https://www.npmjs.com/package/canvaskit-wasm/v/0.40.0
 - License: BSD-3-Clause
 

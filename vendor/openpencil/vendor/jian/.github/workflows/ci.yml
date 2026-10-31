@@ -1,0 +1,261 @@
+name: CI
+
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  RUST_BACKTRACE: short
+
+jobs:
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --all -- --check
+
+  clippy:
+    name: clippy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    name: test ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: linux-aarch64
+            os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - name: macos-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      # Windows: enable long path support so skia-bindings can extract
+      # harfbuzz's vendor tree (test fixtures with very long names)
+      # during `cargo build`. Must run before checkout / build.
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git config --global core.longpaths true
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+            -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force | Out-Null
+      - uses: actions/checkout@v4
+      # Linux: skia-safe links system fontconfig + freetype by default.
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.target }}
+      - run: cargo build --workspace --all-targets --target ${{ matrix.target }}
+      - run: cargo test --workspace --all-targets --target ${{ matrix.target }}
+      - run: cargo test --workspace --doc --target ${{ matrix.target }}
+
+  # ARM64 Windows coverage: x86_64 runner cross-compiles to
+  # `aarch64-pc-windows-msvc`. The `fetch-gn` script in skia-bindings
+  # has no prebuilt gn binary for ARM64 Windows, so native
+  # `windows-11-arm` runners fail. Tests can't execute on a mismatched
+  # host, so this is compile-only.
+  windows-aarch64-cross:
+    name: windows-aarch64 (cross-compile)
+    runs-on: windows-latest
+    steps:
+      - shell: pwsh
+        run: |
+          git config --global core.longpaths true
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+            -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force | Out-Null
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-pc-windows-msvc
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: aarch64-pc-windows-msvc-cross
+      - run: cargo build --workspace --all-targets --target aarch64-pc-windows-msvc
+
+  # Intel Mac (x86_64) coverage: Apple-Silicon runner cross-compiles
+  # to `x86_64-apple-darwin`. This catches cfg / target drift without
+  # waiting on GitHub's constrained `macos-13` queue. Tests can't
+  # execute (no Rosetta in the default `macos-latest` image), so this
+  # is compile-only.
+  macos-x86_64-cross:
+    name: macos-x86_64 (cross-compile)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-apple-darwin
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: x86_64-apple-darwin-cross
+      - run: cargo build --workspace --all-targets --target x86_64-apple-darwin
+
+  # `textlayout` exercises the skia-paragraph path (ICU + HarfBuzz)
+  # that real-font-metric backends (jian-skia's SkiaMeasure) ride on.
+  # skia-bindings 0.78 vendors a depot_tools snapshot whose
+  # `ninja` (bash) and `ninja.bat` (cmd) wrappers both `exec
+  # python3 ninja.py`, which `import pipes` — a stdlib module
+  # Python 3.13 removed. Default GitHub runners ship 3.13.x on
+  # macOS and 3.12.x on Ubuntu / Windows. `setup-python@v5`
+  # prepends 3.11 onto PATH on every OS via `core.addPath`, so
+  # the wrappers resolve `python3` to a working interpreter.
+  #
+  # Maintenance note: this matrix can be deleted once skia-bindings
+  # ships a depot_tools snapshot that drops the `pipes` import
+  # (track <https://github.com/rust-skia/rust-skia/issues>). At
+  # that point fold the textlayout build into the regular `test`
+  # job's command.
+  textlayout:
+    name: textlayout ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: macos-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      # Windows: same long-paths fix as the default test job —
+      # skia-bindings extracts harfbuzz vendor tree under textlayout.
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git config --global core.longpaths true
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+            -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force | Out-Null
+      - uses: actions/checkout@v4
+      # Linux: skia-safe links system fontconfig + freetype regardless
+      # of textlayout. ICU + HarfBuzz are *vendored* by the rust-skia
+      # bundle, no extra apt packages needed.
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: textlayout-${{ matrix.target }}
+      - run: cargo build -p jian-skia --features textlayout --target ${{ matrix.target }}
+      - if: runner.os != 'Windows'
+        run: cargo test -p jian-skia --features textlayout --target ${{ matrix.target }}
+      - if: runner.os == 'Windows'
+        # Windows Server 2025 runners currently crash inside repeated Skia
+        # Paragraph / DirectWrite measurement tests under libtest. Keep
+        # Windows textlayout coverage at build + ParagraphBuilder smoke-test
+        # level; Linux/macOS still run the full textlayout test package above.
+        run: cargo test -p jian-skia --features textlayout --target ${{ matrix.target }} --lib backend::tests::paragraph_builder_renders_cjk_under_feature -- --exact --test-threads=1
+
+  # Plan 18 ASP feature-gate matrix. The default-features `test`
+  # job above doesn't exercise `dev-asp` / `prod-asp`, so the prod
+  # surface (`run_prod_session`, `run_prod_session_via_bridge`,
+  # `prod_op_guard`, byte-budget benchmark, prod_acceptance) AND
+  # the Windows Named Pipe transport (`CreateNamedPipeW` +
+  # SID-resolved DACL) would slip past CI without this job.
+  #
+  # Two feature passes per platform:
+  # - `dev-asp`: full debug surface; pulls in `find` / `inspect` /
+  #   `snapshot` / `audit` / state writes.
+  # - `prod-asp`: lean production surface; runs the prod-only
+  #   integration tests (tests/prod_acceptance.rs) and the
+  #   byte-budget benchmark. On Windows this also exercises
+  #   `windows_bind_smoke_test` against a real Named Pipe.
+  asp-features:
+    name: asp-${{ matrix.feature }} ${{ matrix.name }}
+    strategy:
+      fail-fast: false
+      matrix:
+        feature: [dev-asp, prod-asp]
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - name: macos-aarch64
+            os: macos-latest
+            target: aarch64-apple-darwin
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          git config --global core.longpaths true
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" `
+            -Name "LongPathsEnabled" -Value 1 -PropertyType DWORD -Force | Out-Null
+      - uses: actions/checkout@v4
+      - if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libfontconfig1-dev libfreetype6-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: asp-${{ matrix.feature }}-${{ matrix.target }}
+      - run: cargo build -p jian-asp --features ${{ matrix.feature }} --target ${{ matrix.target }}
+      - run: cargo test -p jian-asp --features ${{ matrix.feature }} --target ${{ matrix.target }}
+      # `prod-asp` feature on `jian` (the CLI) wires `--asp` into
+      # `jian player`. Build + test catches regressions in the
+      # CLI integration (cli_subcommands::player_asp_*).
+      - if: matrix.feature == 'prod-asp'
+        run: cargo build -p jian --features prod-asp --target ${{ matrix.target }}
+      - if: matrix.feature == 'prod-asp'
+        run: cargo test -p jian --features prod-asp --target ${{ matrix.target }}
+
+  docs:
+    name: rustdoc
+    runs-on: ubuntu-latest
+    env:
+      RUSTDOCFLAGS: "-D warnings"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo doc --workspace --no-deps --document-private-items

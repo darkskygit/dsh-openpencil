@@ -27,7 +27,7 @@ const PLATFORM = Object.freeze({
   cpu: 'arm64',
   rustTarget: 'aarch64-apple-darwin',
   runner: 'macos-15',
-  packageName: '@zseven-w/dsh-openpencil-darwin-arm64',
+  packageName: '@darkskygit/dsh-openpencil-darwin-arm64',
   binaryName: 'op-host-web-server',
 })
 

@@ -1,0 +1,77 @@
+[package]
+name         = "jian-skia"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+authors      = { workspace = true }
+description  = "Skia-safe RenderBackend implementation for jian-core"
+
+[features]
+# Raster-only default so `cargo test` doesn't need a GPU context or
+# platform-specific libs. Hosts opt into a GPU backend per-platform
+# via `--features metal` (macOS), `--features d3d` (Windows), or
+# `--features gl` (Linux). The `surface/{metal,d3d,gl}.rs` modules
+# additionally `target_os` -gate themselves so building with
+# `--features metal` on Linux compiles cleanly without dragging the
+# Metal codepath in.
+default = []
+metal   = [
+    "skia-safe/metal",
+    "dep:objc2",
+    "dep:objc2-metal",
+    "dep:objc2-quartz-core",
+]
+d3d     = ["skia-safe/d3d"]
+gl      = ["skia-safe/gl", "dep:khronos-egl"]
+vulkan  = ["skia-safe/vulkan"]
+# Paragraph shaping (ICU + harfbuzz). Opt-in because it bloats the
+# binary by ~15 MB. Without it, `jian-skia` falls back to the canvas'
+# built-in single-line text rendering, which is enough for Stage A.
+textlayout = ["skia-safe/textlayout"]
+
+[dependencies]
+jian-core       = { path = "../jian-core" }
+jian-ops-schema = { path = "../jian-ops-schema" }
+skia-safe       = "0.97.0"
+base64          = "0.22"
+# Used by `startup::spawn_blocking_init` for the worker → main async
+# bridge (`futures::channel::oneshot`). The receiver is awaited inside
+# `jian-core::startup::StartupDriver` phase impls, which already use
+# futures-rs primitives.
+futures         = "0.3"
+# `raw-window-handle` 0.6 is the version winit 0.30 publishes. The
+# per-platform GPU surface factories under
+# `surface/{metal,d3d,gl}.rs` accept a `RawWindowHandle` from the
+# host as their input contract, so this dep stays version-locked
+# with jian-host-desktop's winit. Pulled unconditionally because
+# the crate is tiny (~30 LoC of types) and gating it on every
+# `target_os` × `feature` combo isn't worth the Cargo.toml noise.
+raw-window-handle = "0.6"
+unicode-segmentation = "1.13"
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+objc2 = { version = "0.5.2", optional = true }
+objc2-metal = { version = "0.2.2", optional = true, features = [
+    "MTLCommandBuffer",
+    "MTLCommandQueue",
+    "MTLDevice",
+    "MTLDrawable",
+    "MTLResource",
+    "MTLTexture",
+] }
+objc2-quartz-core = { version = "0.2.2", optional = true, features = [
+    "CALayer",
+    "CAMetalLayer",
+    "objc2-metal",
+] }
+
+[dev-dependencies]
+serde_json        = { workspace = true }
+jian-host-desktop = { path = "../jian-host-desktop" }
+
+# Android EGL surface (behind `gl`): static-linked against the system
+# libEGL/libGLESv2 (no pkg-config on the NDK; links emitted by build.rs).
+[target.'cfg(any(target_os = "android", all(target_os = "linux", target_env = "ohos")))'.dependencies]
+khronos-egl = { version = "6", features = ["static", "no-pkg-config"], optional = true }

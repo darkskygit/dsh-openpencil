@@ -1,0 +1,98 @@
+[package]
+name         = "jian-asp"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+description  = "Jian Agent Shell Protocol — token-efficient AI driving channel for the Jian runtime (dev debug surface + lean prod surface)"
+readme       = "README.md"
+
+# Plan 18 Task 0 + Plan 18 ASP prod mode (C3) — feature-gating contract
+#
+# Two opt-in features, both off by default:
+#
+# - `dev-asp` (master switch for the **debug / automation** surface):
+#   compiles the full verb set including `find` / `inspect` /
+#   `snapshot` / `audit` / `state_verb` / `expr_verb`. Production
+#   hosts must NOT enable this; CI proves the absence via
+#   `ci-action-surface-isolation.yml`.
+#
+# - `prod-asp` (master switch for the **production** surface):
+#   compiles only the lean prod-mode dispatch — `handshake` /
+#   `list_actions` / `tap` / `type` / `scroll` / `swipe` / `exit`.
+#   No structural readers; no expression evaluator; no direct
+#   state writes. Hosts that want token-efficient agent driving in
+#   production builds turn this on (Plan 18 ASP prod mode).
+#
+# The two share runtime infrastructure (protocol envelope, selector
+# resolver, session / token validator, transport, server loop, the
+# operation verbs themselves), so a single set of optional deps
+# powers both.
+#
+# Why `default = ["dev-asp"]` here, but NOT in hosts: stand-alone
+# `cargo build -p jian-asp` is a developer convenience; pulling the
+# crate via a host dep is the gate the CI assertion enforces.
+[features]
+default = ["dev-asp"]
+# `dev-asp` activates the full debug surface. `--no-default-features`
+# truly produces an empty crate (no serde, no modules) — same
+# byte-empty link contract Plan 22 Task 10 asserts.
+dev-asp  = ["__asp-runtime"]
+# `prod-asp` activates the lean production surface. Same runtime
+# infrastructure as `dev-asp`, structural verb modules elided at
+# build time. Plan 18 ASP prod mode / C3.
+prod-asp = ["__asp-runtime"]
+# Internal helper feature: pulls in the shared runtime deps that
+# both `dev-asp` and `prod-asp` need. Hosts don't activate this
+# directly — they enable `dev-asp` or `prod-asp` (or neither).
+__asp-runtime = [
+    "dep:serde",
+    "dep:serde_json",
+    "dep:jian-core",
+    "dep:jian-ops-schema",
+    # Pull in `windows-sys` for the Named Pipe transport. The
+    # `target.'cfg(windows)'.dependencies` table gates the crate
+    # to the Windows target, so this `dep:` activator is a no-op
+    # on Unix builds.
+    "dep:windows-sys",
+]
+
+[dependencies]
+# Phase 1 of Plan 18: protocol + selector type definitions. Pure
+# serde structs / enums — no runtime integration yet (the
+# `resolve(...)` body in `selector/resolve.rs` and the verb dispatch
+# in `verb_impls/` are Task 2-3 follow-ups). Both deps are
+# `optional = true`; the `dev-asp` feature pulls them in via
+# `dep:serde` / `dep:serde_json`. `--no-default-features` keeps the
+# crate empty + serde-free.
+serde      = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+# Selector resolver (`selector/resolve.rs`) walks the runtime
+# document tree to map a `Selector` → `Vec<NodeKey>`. Optional so
+# the no-feature build stays empty.
+jian-core       = { path = "../jian-core", optional = true }
+jian-ops-schema = { path = "../jian-ops-schema", optional = true }
+
+# Plan 18 ASP prod mode (C4 follow-up B): Windows Named Pipe
+# transport. `windows-sys` is already in the workspace via winit /
+# tokio transitives — pulling it directly here lets us call
+# `CreateNamedPipeW` + `ConnectNamedPipe` and build a real
+# user-private DACL (kernel default DACL on a named pipe grants
+# READ to Everyone — not user-private; codex C4-B round 2 HIGH).
+# Gated to the windows target so non-Windows builds skip the
+# crate compile cost.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Pipes",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+    # `Win32_System_IO::CancelSynchronousIo` lets the host's `Drop`
+    # unblock the accept thread parked in `ConnectNamedPipe`. Without
+    # it the thread would leak on shutdown — process-exit reaps it
+    # but the listener's own `Drop` never runs gracefully.
+    "Win32_System_IO",
+] }

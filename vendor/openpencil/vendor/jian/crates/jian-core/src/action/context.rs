@@ -1,0 +1,170 @@
+//! ActionContext — the bundle of references an Action needs during execution.
+
+use super::cancel::CancellationToken;
+use super::capability::CapabilityGate;
+use super::services::{
+    AsyncFeedback, ClipboardService, FeedbackSink, NetworkClient, Router, StorageBackend,
+    WebSocketSession,
+};
+use crate::expression::{Diagnostic, ExpressionCache};
+use crate::logic::LogicProvider;
+use crate::signal::scheduler::Scheduler;
+use crate::state::StateGraph;
+use crate::value::RuntimeValue;
+use std::cell::RefCell;
+use std::collections::{BTreeMap, HashMap};
+use std::rc::Rc;
+use std::sync::Arc;
+
+/// One entry in the live WebSocket registry. Pairs the session
+/// handle with the optional `on_message` ActionList that runs every
+/// time the runtime polls a received message off the wire (see
+/// `Runtime::pump_websockets`).
+#[derive(Clone)]
+pub struct WsHandle {
+    pub session: Rc<dyn WebSocketSession>,
+    /// Author-supplied handler. Stored as JSON because compiled
+    /// `ActionChain` doesn't implement `Clone` and we need to
+    /// re-execute per message; the runtime re-parses each call.
+    pub on_message: Option<serde_json::Value>,
+    pub generation: u64,
+}
+
+/// Live WebSocket sessions, keyed by author-provided id. Inserted by
+/// `ws_connect`, looked up by `ws_send` / `ws_close`, drained by
+/// `Runtime::pump_websockets`. Single-thread `Rc<RefCell<...>>`
+/// matches the rest of the runtime model.
+pub type WsSessionRegistry = Rc<RefCell<HashMap<String, WsHandle>>>;
+
+pub struct ActionContext {
+    pub state: Rc<StateGraph>,
+    pub scheduler: Rc<Scheduler>,
+    pub clock: Option<Arc<crate::action::TaskClock>>,
+    pub document_generation: u64,
+
+    /// $event value for event-triggered action chains. None for lifecycle.
+    pub event: Option<RuntimeValue>,
+
+    /// Local vars injected by enclosing control constructs (for_each -> $item/$index).
+    pub locals: RefCell<BTreeMap<String, RuntimeValue>>,
+
+    pub page_id: Option<String>,
+    pub node_id: Option<String>,
+
+    pub network: Rc<dyn NetworkClient>,
+    pub ws_sessions: WsSessionRegistry,
+    pub storage: Rc<dyn StorageBackend>,
+    pub router: Rc<dyn Router>,
+    pub feedback: Rc<dyn FeedbackSink>,
+    pub async_fb: Rc<dyn AsyncFeedback>,
+    pub clipboard: Rc<dyn ClipboardService>,
+    pub platform: Rc<dyn super::services::PlatformService>,
+
+    pub capabilities: Rc<dyn CapabilityGate>,
+    /// Tier-3 logic provider. `NullLogicProvider` is installed by
+    /// default; hosts override via `Runtime::set_logic_provider`.
+    pub logic: Rc<dyn LogicProvider>,
+    pub expr_cache: Rc<ExpressionCache>,
+
+    pub cancel: CancellationToken,
+    pub warnings: RefCell<Vec<Diagnostic>>,
+}
+
+impl ActionContext {
+    pub fn now_ms(&self) -> u64 {
+        self.clock.as_ref().map_or(0, |clock| clock.now_ms())
+    }
+
+    /// Push a local override (e.g. `$item`) for the duration of a scope.
+    /// Returns the previous value if one existed.
+    pub fn push_local(&self, name: impl Into<String>, value: RuntimeValue) -> Option<RuntimeValue> {
+        self.locals.borrow_mut().insert(name.into(), value)
+    }
+
+    pub fn pop_local(&self, name: &str) -> Option<RuntimeValue> {
+        self.locals.borrow_mut().remove(name)
+    }
+
+    pub fn warn(&self, d: Diagnostic) {
+        self.warnings.borrow_mut().push(d);
+    }
+
+    pub fn take_warnings(&self) -> Vec<Diagnostic> {
+        std::mem::take(&mut self.warnings.borrow_mut())
+    }
+
+    pub fn locals_snapshot(&self) -> BTreeMap<String, RuntimeValue> {
+        let mut snap = self.locals.borrow().clone();
+        // Project the active event (if any) into the locals map under
+        // the literal `$event` key. The expression VM's `lookup_scope`
+        // tries `$event` (literal) first, then strips the leading
+        // `$` and tries `event` against the locals — so an author's
+        // `for_each` loop variable named `event` (legitimate use)
+        // wins the bare-name slot while `$event.<field>` still
+        // routes here. Inserting an `event` alias would invert that
+        // precedence and let a loop variable shadow `$event.key`.
+        if let Some(ev) = &self.event {
+            snap.entry("$event".into()).or_insert_with(|| ev.clone());
+        }
+        snap
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod tests {
+    use super::*;
+    use crate::action::capability::DummyCapabilityGate;
+    use crate::action::services::{
+        NullClipboard, NullFeedback, NullNetworkClient, NullRouter, NullStorageBackend,
+    };
+
+    pub(crate) fn make_ctx() -> ActionContext {
+        let sched = Rc::new(Scheduler::new());
+        ActionContext {
+            state: Rc::new(StateGraph::new(sched.clone())),
+            scheduler: sched,
+            clock: None,
+            document_generation: 0,
+            event: None,
+            locals: RefCell::new(BTreeMap::new()),
+            page_id: None,
+            node_id: None,
+            network: Rc::new(NullNetworkClient),
+            ws_sessions: Rc::new(RefCell::new(HashMap::new())),
+            storage: Rc::new(NullStorageBackend),
+            router: Rc::new(NullRouter),
+            feedback: Rc::new(NullFeedback),
+            async_fb: Rc::new(NullFeedback),
+            clipboard: Rc::new(NullClipboard),
+            platform: Rc::new(crate::action::services::NullPlatform),
+            capabilities: Rc::new(DummyCapabilityGate),
+            logic: Rc::new(crate::logic::NullLogicProvider),
+            expr_cache: Rc::new(ExpressionCache::new()),
+            cancel: CancellationToken::new(),
+            warnings: RefCell::new(Vec::new()),
+        }
+    }
+
+    #[test]
+    fn push_pop_locals() {
+        let ctx = make_ctx();
+        assert!(ctx.locals.borrow().is_empty());
+        ctx.push_local("item", RuntimeValue::from_i64(42));
+        assert_eq!(ctx.locals.borrow().get("item").unwrap().as_i64(), Some(42));
+        ctx.pop_local("item");
+        assert!(ctx.locals.borrow().is_empty());
+    }
+
+    #[test]
+    fn warnings_accumulate_and_drain() {
+        use crate::expression::{DiagKind, Span};
+        let ctx = make_ctx();
+        ctx.warn(Diagnostic {
+            kind: DiagKind::RuntimeWarning,
+            message: "x".into(),
+            span: Span::zero(),
+        });
+        assert_eq!(ctx.take_warnings().len(), 1);
+        assert_eq!(ctx.take_warnings().len(), 0);
+    }
+}

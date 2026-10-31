@@ -1,0 +1,67 @@
+use super::base::{NumberOrExpression, PenNodeBase};
+use super::container::CornerRadius;
+use crate::sizing::SizingBehavior;
+use crate::state_override::WidgetStates;
+use crate::style::{PenEffect, PenFill, PenStroke};
+use serde::{Deserialize, Serialize};
+
+/// Numeric input with optional +/- steppers. Precise complement to
+/// `slider`; `value` two-way binds via `bindings.bind:value`. When
+/// omitted, `min`/`max`/`step` default to none/none/1 at runtime.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, schemars::JsonSchema)]
+#[cfg_attr(feature = "export-ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "export-ts", ts(export, export_to = "ops.ts"))]
+#[serde(rename_all = "camelCase")]
+pub struct NumberInputNode {
+    #[serde(flatten)]
+    pub base: PenNodeBase,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub width: Option<SizingBehavior>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub height: Option<SizingBehavior>,
+    #[serde(flatten)]
+    pub limits: crate::sizing::SizeLimits,
+    /// Placeholder shown when `value` is empty.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub placeholder: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<NumberOrExpression>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub return_key_hint: Option<String>,
+    /// Lucide glyph drawn at the left content edge. See `TextInputNode`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub leading_icon: Option<String>,
+    /// Lucide glyph drawn at the right content edge. See `TextInputNode`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trailing_icon: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub step: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fill: Option<Vec<PenFill>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stroke: Option<PenStroke>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub effects: Option<Vec<PenEffect>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corner_radius: Option<CornerRadius>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub states: Option<WidgetStates>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<crate::state::StateSchema>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bindings: Option<crate::events::Bindings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub events: Option<crate::events::EventHandlers>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lifecycle: Option<crate::lifecycle::NodeLifecycleHooks>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub semantics: Option<crate::semantics::SemanticsMeta>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gestures: Option<crate::gestures::GestureOverrides>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<crate::navigation::NavigationRoute>,
+}

@@ -57,7 +57,7 @@ if (requireRuntime) {
 process.stdout.write(`verified ${selectedPlatforms.length} platform package metadata${requireRuntime ? ` and packaged runtime smoke${requireCollabBootstrap ? ' with production relay bootstrap' : ''}` : ' (metadata-only)'}\n`)
 
 function assertRootMetadata() {
-  if (rootManifest.name !== '@zseven-w/dsh-openpencil') throw new Error('unexpected root package name')
+  if (rootManifest.name !== '@darkskygit/dsh-openpencil') throw new Error('unexpected root package name')
   if (!/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(rootManifest.version ?? '')) {
     throw new Error(`root package has an invalid release version: ${JSON.stringify(rootManifest.version)}`)
   }

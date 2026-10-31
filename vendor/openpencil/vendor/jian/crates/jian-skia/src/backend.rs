@@ -1,0 +1,1476 @@
+//! `SkiaBackend` — the `RenderBackend` impl.
+//!
+//! The `RenderBackend` trait from Plan 2 is canvas-less: `draw`,
+//! `push_clip`, `push_transform`, `push_layer`, `apply_blur`, and
+//! `apply_shadow` don't carry the surface. To honour the full contract,
+//! `SkiaBackend` accumulates a `Vec<Cmd>` between `begin_frame` and
+//! `end_frame`, then replays it onto the surface's canvas. This means a
+//! caller written against the generic trait gets correct output even
+//! though the trait itself never sees the canvas.
+//!
+//! The canvas-aware entry point `SkiaBackend::draw_on(surface, op)`
+//! remains available for host adapters that want to draw without
+//! going through the frame-scoped command buffer.
+
+use crate::color::to_sk_color;
+use crate::convert::{to_sk_matrix, to_sk_rect};
+use crate::image::ImageCache;
+use crate::path::to_sk_path;
+use crate::shader_cache::ShaderCache;
+use crate::surface::SkiaSurface;
+use jian_core::geometry::{Affine2, Rect, Size};
+use jian_core::render::{BorderRadii, DrawOp, ImageSource, Paint, RenderBackend, ShadowSpec};
+use skia_safe::{
+    canvas::SaveLayerRec, image_filters, BlurStyle, Color, Color4f, ImageFilter, MaskFilter,
+    Paint as SkPaint, PaintStyle, Point as SkPoint, RRect, Rect as SkRect,
+};
+
+/// Buffered command — one-to-one with a trait-level `RenderBackend` call.
+#[derive(Clone)]
+enum Cmd {
+    PushClip(Rect),
+    PushTransform(Affine2),
+    Pop,
+    PushLayer {
+        bounds: Rect,
+        filter: Option<ImageFilter>,
+    },
+    PopLayer,
+    Draw(DrawOp),
+}
+
+pub struct SkiaBackend {
+    /// Pending image filter accumulated by `apply_blur` / `apply_shadow`.
+    /// Consumed by the next `push_layer` so the layer is drawn with the
+    /// filter applied.
+    pending_filter: Option<ImageFilter>,
+    /// Recorded commands for the current frame. Drained by `end_frame`.
+    cmds: Vec<Cmd>,
+    /// Decoded `sk_Image` cache keyed by `ImageSource::cache_key`.
+    /// Reused across frames so scrolling lists don't repeat decode.
+    image_cache: ImageCache,
+    /// Compiled-SkSL `RuntimeEffect` cache keyed by source hash —
+    /// compile-once-per-unique-source so per-frame repaints reuse the
+    /// program instead of recompiling.
+    shader_cache: ShaderCache,
+}
+
+impl SkiaBackend {
+    pub fn new() -> Self {
+        Self {
+            pending_filter: None,
+            cmds: Vec::new(),
+            image_cache: ImageCache::new(),
+            shader_cache: ShaderCache::new(),
+        }
+    }
+
+    /// Number of distinct SkSL programs compiled so far — exposed for
+    /// the compile-cache proof (per-frame repaints must NOT grow this).
+    pub fn shader_compile_count(&self) -> u64 {
+        self.shader_cache.compile_count()
+    }
+
+    fn record(&mut self, cmd: Cmd) {
+        self.cmds.push(cmd);
+    }
+}
+
+impl Default for SkiaBackend {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RenderBackend for SkiaBackend {
+    type Surface = SkiaSurface;
+
+    fn new_surface(&mut self, size: Size) -> Self::Surface {
+        SkiaSurface::new_raster(size.width.max(1.0) as i32, size.height.max(1.0) as i32)
+    }
+
+    fn begin_frame(&mut self, surface: &mut Self::Surface, clear: u32) {
+        let canvas = surface.canvas();
+        canvas.clear(Color::new(clear));
+        canvas.save();
+        self.cmds.clear();
+        self.pending_filter = None;
+    }
+
+    fn end_frame(&mut self, surface: &mut Self::Surface) {
+        let cmds = std::mem::take(&mut self.cmds);
+        let canvas = surface.canvas();
+        for cmd in cmds {
+            match cmd {
+                Cmd::PushClip(r) => {
+                    canvas.save();
+                    canvas.clip_rect(to_sk_rect(r), None, true);
+                }
+                Cmd::PushTransform(m) => {
+                    canvas.save();
+                    canvas.concat(&to_sk_matrix(&m));
+                }
+                Cmd::Pop => {
+                    canvas.restore();
+                }
+                Cmd::PushLayer { bounds, filter } => {
+                    let sk_bounds = to_sk_rect(bounds);
+                    let paint = filter.map(|f| {
+                        let mut p = SkPaint::default();
+                        p.set_image_filter(f);
+                        p
+                    });
+                    let mut rec = SaveLayerRec::default().bounds(&sk_bounds);
+                    if let Some(ref p) = paint {
+                        rec = rec.paint(p);
+                    }
+                    canvas.save_layer(&rec);
+                }
+                Cmd::PopLayer => {
+                    canvas.restore();
+                }
+                Cmd::Draw(op) => {
+                    draw_canvas(canvas, &op, &mut self.image_cache, &mut self.shader_cache);
+                }
+            }
+        }
+        // Matches the `save()` in begin_frame; anything left on the stack
+        // (a caller that forgot to pop) is cleaned up by restore_to_count.
+        canvas.restore_to_count(1);
+    }
+
+    fn push_clip(&mut self, rect: Rect) {
+        self.record(Cmd::PushClip(rect));
+    }
+
+    fn push_transform(&mut self, m: &Affine2) {
+        self.record(Cmd::PushTransform(*m));
+    }
+
+    fn pop(&mut self) {
+        self.record(Cmd::Pop);
+    }
+
+    fn push_layer(&mut self, bounds: Rect) {
+        let filter = self.pending_filter.take();
+        self.record(Cmd::PushLayer { bounds, filter });
+    }
+
+    fn pop_layer(&mut self) {
+        self.record(Cmd::PopLayer);
+    }
+
+    fn apply_blur(&mut self, sigma: f32) {
+        self.pending_filter = image_filters::blur((sigma, sigma), None, None, None);
+    }
+
+    fn apply_shadow(&mut self, shadow: &ShadowSpec) {
+        let color = to_sk_color(shadow.color);
+        let rgba = Color::from_argb(
+            (color.a * 255.0) as u8,
+            (color.r * 255.0) as u8,
+            (color.g * 255.0) as u8,
+            (color.b * 255.0) as u8,
+        );
+        self.pending_filter = image_filters::drop_shadow(
+            (shadow.dx, shadow.dy),
+            (shadow.blur, shadow.blur),
+            rgba,
+            None,
+            None,
+            None,
+        );
+    }
+
+    fn draw(&mut self, op: &DrawOp) {
+        self.record(Cmd::Draw(op.clone()));
+    }
+}
+
+impl SkiaBackend {
+    /// Canvas-aware entry point — bypasses the command buffer and draws
+    /// directly. Host adapters that already have the surface in hand can
+    /// use this to avoid the buffer-and-replay round-trip.
+    pub fn draw_on(&mut self, surface: &mut SkiaSurface, op: &DrawOp) {
+        draw_canvas(
+            surface.canvas(),
+            op,
+            &mut self.image_cache,
+            &mut self.shader_cache,
+        );
+    }
+
+    /// GPU-canvas adapter — same as `draw_on` but accepts a borrowed
+    /// `&skia_safe::Canvas` directly. Used by hosts that own a GPU
+    /// `DirectContext` + `Surface` outside of `SkiaBackend` (e.g.
+    /// OpenPencil's `SharedSkiaContext`) and only need the per-`DrawOp`
+    /// canvas dispatch from this crate.
+    pub fn draw_on_canvas(&mut self, canvas: &skia_safe::Canvas, op: &DrawOp) {
+        draw_canvas(canvas, op, &mut self.image_cache, &mut self.shader_cache);
+    }
+}
+
+fn draw_canvas(
+    canvas: &skia_safe::Canvas,
+    op: &DrawOp,
+    image_cache: &mut ImageCache,
+    shader_cache: &mut ShaderCache,
+) {
+    match op {
+        DrawOp::Rect { rect, paint } => draw_rect(canvas, *rect, paint),
+        DrawOp::RoundedRect { rect, radii, paint } => draw_rrect(canvas, *rect, *radii, paint),
+        DrawOp::Path { commands, paint } => {
+            let path = to_sk_path(commands);
+            if let Some(fill_color) = paint.fill {
+                let mut p = SkPaint::new(to_sk_color(fill_color), None);
+                p.set_alpha_f(combined_alpha(fill_color, paint.opacity));
+                p.set_anti_alias(true);
+                p.set_style(PaintStyle::Fill);
+                canvas.draw_path(&path, &p);
+            }
+            if let Some(ref stroke) = paint.stroke {
+                let mut p = SkPaint::new(to_sk_color(stroke.color), None);
+                p.set_style(PaintStyle::Stroke);
+                p.set_stroke_width(stroke.width);
+                p.set_anti_alias(true);
+                p.set_alpha_f(combined_alpha(stroke.color, paint.opacity));
+                canvas.draw_path(&path, &p);
+            }
+        }
+        DrawOp::Image {
+            source,
+            dst,
+            opacity,
+        } => draw_image(canvas, image_cache, source, *dst, *opacity),
+        DrawOp::Text(run) => draw_text(canvas, run),
+        DrawOp::LinearGradientRect {
+            rect,
+            radii,
+            gradient,
+            stroke,
+        } => draw_linear_gradient_rect(canvas, *rect, *radii, gradient, stroke.as_ref()),
+        DrawOp::RadialGradientRect {
+            rect,
+            radii,
+            gradient,
+            stroke,
+        } => draw_radial_gradient_rect(canvas, *rect, *radii, gradient, stroke.as_ref()),
+        DrawOp::MeshGradientRect {
+            rect,
+            radii,
+            gradient,
+            stroke,
+        } => draw_mesh_gradient_rect(canvas, *rect, *radii, gradient, stroke.as_ref()),
+        DrawOp::ShaderRect {
+            rect,
+            radii,
+            shader,
+            stroke,
+        } => draw_shader_rect(canvas, shader_cache, *rect, *radii, shader, stroke.as_ref()),
+        DrawOp::ShadowedRect {
+            rect,
+            radii,
+            shadow,
+        } => {
+            draw_shadowed_rect(canvas, *rect, *radii, shadow);
+        }
+        DrawOp::Icon {
+            rect,
+            name,
+            family: _,
+            color,
+        } => draw_icon(canvas, *rect, name, *color),
+    }
+}
+
+fn draw_text(canvas: &skia_safe::Canvas, run: &jian_core::render::TextRun) {
+    // Both shaping paths below build a `FontMgr` (DirectWrite on Windows) and
+    // match system typefaces; serialize the whole draw with every other
+    // DirectWrite user so a concurrent measure/paint on another thread can't
+    // segfault. Reentrant, so nesting under a locked caller is a no-op.
+    crate::font_lock::with_font_lock(|| {
+        #[cfg(feature = "textlayout")]
+        {
+            if draw_text_paragraph(canvas, run) {
+                return;
+            }
+        }
+        draw_text_singleline(canvas, run);
+    });
+}
+
+/// Single-line shaping path (no `textlayout`). Splits on `\n`, runs
+/// `font.measure_str` per word, lines wrapped greedily.
+fn draw_text_singleline(canvas: &skia_safe::Canvas, run: &jian_core::render::TextRun) {
+    use jian_core::render::TextAlign;
+    use skia_safe::font_style::Weight;
+    use skia_safe::FontStyle;
+
+    let mut p = SkPaint::new(to_sk_color(run.color), None);
+    p.set_anti_alias(true);
+
+    let weight = Weight::from(run.font_weight as i32);
+    let style = FontStyle::new(
+        weight,
+        skia_safe::font_style::Width::NORMAL,
+        skia_safe::font_style::Slant::Upright,
+    );
+    let mgr = skia_safe::FontMgr::new();
+    let typeface = if !run.font_family.is_empty() {
+        mgr.match_family_style(&run.font_family, style)
+            .or_else(|| mgr.legacy_make_typeface(None, style))
+    } else {
+        mgr.legacy_make_typeface(None, style)
+    }
+    .expect("default typeface");
+    let font = skia_safe::Font::new(typeface, run.font_size);
+
+    // Line-height in pixels (defaults to 1.3× font_size if unset).
+    let line_mult = if run.line_height > 0.0 {
+        run.line_height
+    } else {
+        1.3
+    };
+    let line_h = run.font_size * line_mult;
+
+    // Simple word-wrap: split by spaces and accumulate runs that fit
+    // within `max_width`. When `max_width == 0` draw on a single line.
+    let lines = if run.max_width > 0.0 {
+        wrap_to_lines(&run.content, &font, &p, run.max_width)
+    } else {
+        vec![run.content.clone()]
+    };
+
+    for (i, line) in lines.iter().enumerate() {
+        let (line_w, _) = font.measure_str(line, Some(&p));
+        let x = match run.align {
+            TextAlign::Start => run.origin.x,
+            TextAlign::Center => run.origin.x + (run.max_width - line_w) * 0.5,
+            TextAlign::End => run.origin.x + (run.max_width - line_w),
+        };
+        // Baseline-y: font_size baseline is roughly 80% of font size.
+        // Using `origin.y + font_size` matches CSS-ish placement.
+        let y = run.origin.y + run.font_size + (i as f32) * line_h;
+        canvas.draw_str(line, SkPoint::new(x, y), &font, &p);
+    }
+}
+
+fn wrap_to_lines(
+    content: &str,
+    font: &skia_safe::Font,
+    paint: &SkPaint,
+    max_width: f32,
+) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for paragraph in content.split('\n') {
+        if paragraph.is_empty() {
+            lines.push(String::new());
+            continue;
+        }
+        // Measure the whole paragraph first — if it fits, no wrapping.
+        let (w_all, _) = font.measure_str(paragraph, Some(paint));
+        if w_all <= max_width {
+            lines.push(paragraph.to_owned());
+            continue;
+        }
+        let mut cur = String::new();
+        for word in paragraph.split_whitespace() {
+            let trial = if cur.is_empty() {
+                word.to_owned()
+            } else {
+                format!("{} {}", cur, word)
+            };
+            let (tw, _) = font.measure_str(&trial, Some(paint));
+            if tw <= max_width || cur.is_empty() {
+                cur = trial;
+            } else {
+                lines.push(std::mem::take(&mut cur));
+                cur = word.to_owned();
+            }
+        }
+        if !cur.is_empty() {
+            lines.push(cur);
+        }
+    }
+    lines
+}
+
+/// `textlayout` feature path — uses Skia ParagraphBuilder for proper
+/// CJK / emoji shaping + bidi + per-segment styles. Returns `true`
+/// when shaping ran successfully; the single-line fallback runs
+/// when this path returns `false` (e.g. font manager unavailable).
+#[cfg(feature = "textlayout")]
+fn draw_text_paragraph(canvas: &skia_safe::Canvas, run: &jian_core::render::TextRun) -> bool {
+    use jian_core::render::TextAlign;
+    use skia_safe::textlayout::{
+        FontCollection, ParagraphBuilder, ParagraphStyle, TextAlign as SkTextAlign, TextStyle,
+    };
+    use skia_safe::FontMgr;
+
+    // Asset manager carries the host's imported + bundled design fonts
+    // (if any), so a family the system lacks still resolves here instead
+    // of silently falling back to the platform default. Rebuilt fresh
+    // per call, so a runtime font import is picked up immediately.
+    let font_provider = crate::bundled_fonts::asset_provider().unwrap_or_default();
+    let mut collection = FontCollection::new();
+    collection.set_default_font_manager(FontMgr::new(), None);
+    collection.set_asset_font_manager(Some(font_provider.clone().into()));
+
+    let mut style = ParagraphStyle::new();
+    style.set_text_align(match run.align {
+        TextAlign::Start => SkTextAlign::Start,
+        TextAlign::Center => SkTextAlign::Center,
+        TextAlign::End => SkTextAlign::End,
+    });
+    let mut text_style = TextStyle::new();
+    text_style.set_font_size(run.font_size);
+    if run.line_height > 0.0 {
+        // Apply line-height on the TEXT style (matching `SkiaMeasure`), not
+        // the paragraph style, so paint and measure use the identical box;
+        // `half_leading` splits the extra leading half above + half below
+        // the glyphs the way Pencil/CSS do (skia's proportional default
+        // drifts each baseline and ghosts multi-line text vs Pencil).
+        text_style.set_height(run.line_height);
+        text_style.set_height_override(true);
+        text_style.set_half_leading(true);
+    }
+    let c4 = to_sk_color(run.color);
+    text_style.set_color(skia_safe::Color::from_argb(
+        (c4.a * 255.0) as u8,
+        (c4.r * 255.0) as u8,
+        (c4.g * 255.0) as u8,
+        (c4.b * 255.0) as u8,
+    ));
+    if !run.font_family.is_empty() {
+        text_style.set_font_families(&[run.font_family.as_str()]);
+    }
+    // Match the single-line fallback's font-weight handling so
+    // enabling the `textlayout` feature doesn't change visual
+    // output for ASCII text.
+    let fs = skia_safe::FontStyle::new(
+        skia_safe::font_style::Weight::from(run.font_weight as i32),
+        skia_safe::font_style::Width::NORMAL,
+        skia_safe::font_style::Slant::Upright,
+    );
+    text_style.set_font_style(fs);
+    style.set_text_style(&text_style);
+
+    let mut builder = ParagraphBuilder::new(&style, collection);
+    builder.add_text(&run.content);
+    let mut paragraph = builder.build();
+    let max_w = if run.max_width > 0.0 {
+        run.max_width
+    } else {
+        f32::MAX
+    };
+    paragraph.layout(max_w);
+    paragraph.paint(canvas, (run.origin.x, run.origin.y));
+    true
+}
+
+fn draw_icon(canvas: &skia_safe::Canvas, r: Rect, name: &str, color: jian_core::scene::Color) {
+    use skia_safe::{utils::parse_path, Matrix};
+    let Some(d) = crate::icons::lookup(name) else {
+        // Unknown glyph — fall back to a small filled square so the
+        // missing icon is visible for debugging.
+        let mut p = SkPaint::new(to_sk_color(color), None);
+        p.set_anti_alias(true);
+        p.set_style(PaintStyle::Fill);
+        canvas.draw_rect(to_sk_rect(r), &p);
+        return;
+    };
+    let Some(path) = parse_path::from_svg(d) else {
+        return;
+    };
+    // Lucide icons are authored in a 24×24 viewBox. Scale + translate
+    // into the target rect, preserving aspect ratio.
+    let scale_x = r.size.width / 24.0;
+    let scale_y = r.size.height / 24.0;
+    let mut m = Matrix::new_identity();
+    m.pre_translate((r.min_x(), r.min_y()));
+    m.pre_scale((scale_x, scale_y), None);
+    // skia-safe 0.97 replaced the mutating `Path::transform(&Matrix)` with
+    // `Path::with_transform(&Matrix) -> Path` returning a fresh path.
+    let path = path.with_transform(&m);
+
+    let mut sp = SkPaint::new(to_sk_color(color), None);
+    sp.set_anti_alias(true);
+    sp.set_style(PaintStyle::Stroke);
+    // Lucide's native stroke-width is 2 at 24px. Normalise so the
+    // visual weight is consistent across icon sizes.
+    let stroke_w = 2.0 * scale_x.min(scale_y).max(0.1);
+    sp.set_stroke_width(stroke_w);
+    sp.set_stroke_cap(skia_safe::paint::Cap::Round);
+    sp.set_stroke_join(skia_safe::paint::Join::Round);
+    canvas.draw_path(&path, &sp);
+}
+
+fn gradient_endpoints(rect: Rect, angle_deg: f32) -> ((f32, f32), (f32, f32)) {
+    // Angle convention matches the .op schema: 0° flows left-to-right,
+    // 90° top-to-bottom (clockwise from +x). We pick the two points on
+    // the rect's edges where the axis-aligned gradient line meets.
+    let cx = rect.min_x() + rect.size.width * 0.5;
+    let cy = rect.min_y() + rect.size.height * 0.5;
+    let rad = angle_deg.to_radians();
+    let dx = rad.cos();
+    let dy = rad.sin();
+    let half_w = rect.size.width * 0.5;
+    let half_h = rect.size.height * 0.5;
+    // Project half-diagonal onto the axis so the gradient spans the
+    // whole rect along the requested direction.
+    let t = (dx.abs() * half_w) + (dy.abs() * half_h);
+    let x0 = cx - dx * t;
+    let y0 = cy - dy * t;
+    let x1 = cx + dx * t;
+    let y1 = cy + dy * t;
+    ((x0, y0), (x1, y1))
+}
+
+fn draw_linear_gradient_rect(
+    canvas: &skia_safe::Canvas,
+    rect: Rect,
+    radii: BorderRadii,
+    g: &jian_core::render::LinearGradient,
+    stroke: Option<&jian_core::render::StrokeOp>,
+) {
+    use skia_safe::{gradient, Shader, TileMode};
+    let (p0, p1) = gradient_endpoints(rect, g.angle_deg);
+    let colors: Vec<Color4f> = g.stops.iter().map(|s| to_sk_color(s.color)).collect();
+    let offsets: Vec<f32> = g.stops.iter().map(|s| s.offset.clamp(0.0, 1.0)).collect();
+    // skia-safe 0.97 replaced `gradient_shader::linear` with `gradient::shaders::linear_gradient`
+    // taking a `gradient::Gradient { colors, interpolation }` description.
+    let gradient_colors =
+        gradient::Colors::new(&colors, Some(offsets.as_slice()), TileMode::Clamp, None);
+    let gradient_obj = gradient::Gradient::new(gradient_colors, gradient::Interpolation::default());
+    let shader: Option<Shader> = gradient::shaders::linear_gradient(
+        (SkPoint::new(p0.0, p0.1), SkPoint::new(p1.0, p1.1)),
+        &gradient_obj,
+        None,
+    );
+    let mut paint = SkPaint::default();
+    paint.set_anti_alias(true);
+    paint.set_style(PaintStyle::Fill);
+    paint.set_alpha_f(g.opacity);
+    if let Some(s) = shader {
+        paint.set_shader(s as Shader);
+    }
+
+    let is_rounded = radii != BorderRadii::zero();
+    if is_rounded {
+        let sk_rect = to_sk_rect(rect);
+        let radii_arr = [
+            SkPoint::new(radii.tl, radii.tl),
+            SkPoint::new(radii.tr, radii.tr),
+            SkPoint::new(radii.br, radii.br),
+            SkPoint::new(radii.bl, radii.bl),
+        ];
+        let rrect = RRect::new_rect_radii(sk_rect, &radii_arr);
+        canvas.draw_rrect(rrect, &paint);
+    } else {
+        canvas.draw_rect(to_sk_rect(rect), &paint);
+    }
+
+    if let Some(stroke) = stroke {
+        let mut p = SkPaint::new(to_sk_color(stroke.color), None);
+        p.set_style(PaintStyle::Stroke);
+        p.set_stroke_width(stroke.width);
+        p.set_anti_alias(true);
+        if is_rounded {
+            let sk_rect = to_sk_rect(rect);
+            let radii_arr = [
+                SkPoint::new(radii.tl, radii.tl),
+                SkPoint::new(radii.tr, radii.tr),
+                SkPoint::new(radii.br, radii.br),
+                SkPoint::new(radii.bl, radii.bl),
+            ];
+            let rrect = RRect::new_rect_radii(sk_rect, &radii_arr);
+            canvas.draw_rrect(rrect, &p);
+        } else {
+            canvas.draw_rect(to_sk_rect(rect), &p);
+        }
+    }
+}
+
+fn draw_image(
+    canvas: &skia_safe::Canvas,
+    cache: &mut ImageCache,
+    source: &ImageSource,
+    dst: Rect,
+    opacity: f32,
+) {
+    use skia_safe::{canvas::SrcRectConstraint, SamplingOptions};
+    let dst_rect = to_sk_rect(dst);
+    if let Some(img) = cache.get_or_decode(source) {
+        let mut p = SkPaint::default();
+        p.set_anti_alias(true);
+        p.set_alpha_f(opacity);
+        // object-fit: cover — parity with TS `node-renderer.ts` drawImage,
+        // whose default (`objectFit ?? 'fill'`) branch scales by `Math.max`.
+        // Center-crop the SOURCE to the destination's aspect ratio so the
+        // image fills its slot without distorting: a 4:3 photo dropped into a
+        // wide card header is cropped top/bottom, not squashed horizontally.
+        // The previous full-source → dst mapping stretched every image.
+        let iw = img.width() as f32;
+        let ih = img.height() as f32;
+        let dw = dst_rect.width().max(1.0);
+        let dh = dst_rect.height().max(1.0);
+        let src_rect = if iw > 0.0 && ih > 0.0 {
+            let src_aspect = iw / ih;
+            let dst_aspect = dw / dh;
+            let (mut cw, mut ch) = (iw, ih);
+            if src_aspect > dst_aspect {
+                cw = ih * dst_aspect; // source too wide → crop left/right
+            } else {
+                ch = iw / dst_aspect; // source too tall → crop top/bottom
+            }
+            let cx = (iw - cw) * 0.5;
+            let cy = (ih - ch) * 0.5;
+            SkRect::from_xywh(cx, cy, cw, ch)
+        } else {
+            SkRect::from_iwh(img.width(), img.height())
+        };
+        canvas.draw_image_rect_with_sampling_options(
+            img,
+            Some((&src_rect, SrcRectConstraint::Strict)),
+            dst_rect,
+            SamplingOptions::default(),
+            &p,
+        );
+    } else {
+        // Decode failed (or remote URL with no resolver) — fall back to
+        // a grey placeholder so the slot is visible at the right size.
+        let mut p = SkPaint::new(Color4f::new(0.5, 0.5, 0.5, opacity), None);
+        p.set_anti_alias(true);
+        canvas.draw_rect(dst_rect, &p);
+    }
+}
+
+fn draw_radial_gradient_rect(
+    canvas: &skia_safe::Canvas,
+    rect: Rect,
+    radii: BorderRadii,
+    g: &jian_core::render::RadialGradient,
+    stroke: Option<&jian_core::render::StrokeOp>,
+) {
+    use skia_safe::{gradient, Shader, TileMode};
+
+    // cx/cy ∈ [0,1] within the rect; radius ∈ [0,1] of max(w, h).
+    let cx = rect.min_x() + g.cx * rect.size.width;
+    let cy = rect.min_y() + g.cy * rect.size.height;
+    let r = g.radius * rect.size.width.max(rect.size.height);
+
+    let colors: Vec<Color4f> = g.stops.iter().map(|s| to_sk_color(s.color)).collect();
+    let offsets: Vec<f32> = g.stops.iter().map(|s| s.offset.clamp(0.0, 1.0)).collect();
+    // skia-safe 0.97 replaced `gradient_shader::radial` with `gradient::shaders::radial_gradient`
+    // taking `(center, radius)` and a `gradient::Gradient` description.
+    let gradient_colors =
+        gradient::Colors::new(&colors, Some(offsets.as_slice()), TileMode::Clamp, None);
+    let gradient_obj = gradient::Gradient::new(gradient_colors, gradient::Interpolation::default());
+    let shader: Option<Shader> =
+        gradient::shaders::radial_gradient((SkPoint::new(cx, cy), r.max(0.0)), &gradient_obj, None);
+    let mut paint = SkPaint::default();
+    paint.set_anti_alias(true);
+    paint.set_style(PaintStyle::Fill);
+    paint.set_alpha_f(g.opacity);
+    if let Some(s) = shader {
+        paint.set_shader(s as Shader);
+    }
+
+    let is_rounded = radii != BorderRadii::zero();
+    if is_rounded {
+        let sk_rect = to_sk_rect(rect);
+        let radii_arr = [
+            SkPoint::new(radii.tl, radii.tl),
+            SkPoint::new(radii.tr, radii.tr),
+            SkPoint::new(radii.br, radii.br),
+            SkPoint::new(radii.bl, radii.bl),
+        ];
+        let rrect = RRect::new_rect_radii(sk_rect, &radii_arr);
+        canvas.draw_rrect(rrect, &paint);
+    } else {
+        canvas.draw_rect(to_sk_rect(rect), &paint);
+    }
+
+    if let Some(stroke) = stroke {
+        let mut p = SkPaint::new(to_sk_color(stroke.color), None);
+        p.set_style(PaintStyle::Stroke);
+        p.set_stroke_width(stroke.width);
+        p.set_anti_alias(true);
+        if is_rounded {
+            let sk_rect = to_sk_rect(rect);
+            let radii_arr = [
+                SkPoint::new(radii.tl, radii.tl),
+                SkPoint::new(radii.tr, radii.tr),
+                SkPoint::new(radii.br, radii.br),
+                SkPoint::new(radii.bl, radii.bl),
+            ];
+            let rrect = RRect::new_rect_radii(sk_rect, &radii_arr);
+            canvas.draw_rrect(rrect, &p);
+        } else {
+            canvas.draw_rect(to_sk_rect(rect), &p);
+        }
+    }
+}
+
+fn draw_mesh_gradient_rect(
+    canvas: &skia_safe::Canvas,
+    rect: Rect,
+    radii: BorderRadii,
+    g: &jian_core::render::MeshGradient,
+    stroke: Option<&jian_core::render::StrokeOp>,
+) {
+    use skia_safe::{vertices::VertexMode, BlendMode as SkBlendMode, Vertices};
+
+    let rows = g.rows.max(2);
+    let cols = g.cols.max(2);
+    let vcount = (rows * cols) as usize;
+    if g.colors.len() != vcount {
+        return;
+    }
+
+    // Lattice vertex positions across the rect: vertex (r, c) maps to
+    // (c/(cols-1), r/(rows-1)) of the rect. Colours come straight from
+    // the row-major grid; `texs` is unused (no shader) but must match
+    // the vertex count, so we reuse `positions`.
+    let mut positions: Vec<SkPoint> = Vec::with_capacity(vcount);
+    let mut colors: Vec<Color> = Vec::with_capacity(vcount);
+    let denom_c = (cols - 1) as f32;
+    let denom_r = (rows - 1) as f32;
+    for r in 0..rows {
+        for c in 0..cols {
+            let fx = rect.min_x() + (c as f32 / denom_c) * rect.size.width;
+            let fy = rect.min_y() + (r as f32 / denom_r) * rect.size.height;
+            positions.push(SkPoint::new(fx, fy));
+            let jc = g.colors[(r * cols + c) as usize];
+            colors.push(Color::from_argb(jc.a(), jc.r(), jc.g(), jc.b()));
+        }
+    }
+
+    // Triangulate each grid cell into two triangles (CCW). Index of
+    // vertex (r, c) is `r * cols + c`.
+    let mut indices: Vec<u16> = Vec::with_capacity(((rows - 1) * (cols - 1) * 6) as usize);
+    for r in 0..(rows - 1) {
+        for c in 0..(cols - 1) {
+            let tl = (r * cols + c) as u16;
+            let tr = (r * cols + c + 1) as u16;
+            let bl = ((r + 1) * cols + c) as u16;
+            let br = ((r + 1) * cols + c + 1) as u16;
+            indices.extend_from_slice(&[tl, tr, bl, tr, br, bl]);
+        }
+    }
+
+    let vertices = Vertices::new_copy(
+        VertexMode::Triangles,
+        &positions,
+        &positions,
+        &colors,
+        Some(&indices),
+    );
+
+    // Clip to the node's round-rect so the Gouraud fill respects corner
+    // radius, then draw the per-vertex-coloured triangles. SrcOver blends
+    // the vertex colours straight onto the canvas (Modulate would need a
+    // shader to modulate against).
+    let is_rounded = radii != BorderRadii::zero();
+    let restore_count = canvas.save();
+    if is_rounded {
+        let sk_rect = to_sk_rect(rect);
+        let radii_arr = [
+            SkPoint::new(radii.tl, radii.tl),
+            SkPoint::new(radii.tr, radii.tr),
+            SkPoint::new(radii.br, radii.br),
+            SkPoint::new(radii.bl, radii.bl),
+        ];
+        let rrect = RRect::new_rect_radii(sk_rect, &radii_arr);
+        canvas.clip_rrect(rrect, None, Some(true));
+    } else {
+        canvas.clip_rect(to_sk_rect(rect), None, Some(true));
+    }
+
+    // `draw_vertices` with no shader combines each interpolated vertex
+    // colour with the paint's colour via `mode`. A default Paint is opaque
+    // BLACK, so seed it white and use `Modulate` (white × vertex == vertex)
+    // to pass the vertex colours through unchanged; `opacity` rides in the
+    // paint alpha.
+    let mut paint = SkPaint::default();
+    paint.set_anti_alias(true);
+    paint.set_color4f(Color4f::new(1.0, 1.0, 1.0, g.opacity), None);
+    canvas.draw_vertices(&vertices, SkBlendMode::Modulate, &paint);
+    canvas.restore_to_count(restore_count);
+
+    if let Some(stroke) = stroke {
+        let mut p = SkPaint::new(to_sk_color(stroke.color), None);
+        p.set_style(PaintStyle::Stroke);
+        p.set_stroke_width(stroke.width);
+        p.set_anti_alias(true);
+        if is_rounded {
+            let sk_rect = to_sk_rect(rect);
+            let radii_arr = [
+                SkPoint::new(radii.tl, radii.tl),
+                SkPoint::new(radii.tr, radii.tr),
+                SkPoint::new(radii.br, radii.br),
+                SkPoint::new(radii.bl, radii.bl),
+            ];
+            let rrect = RRect::new_rect_radii(sk_rect, &radii_arr);
+            canvas.draw_rrect(rrect, &p);
+        } else {
+            canvas.draw_rect(to_sk_rect(rect), &p);
+        }
+    }
+}
+
+/// Fill a (round-)rect with a native SkSL shader. The program is
+/// compiled once and cached on `shader_cache` (keyed by source hash);
+/// per-frame repaints reuse the `RuntimeEffect`. Uniforms are bound
+/// through `RuntimeShaderBuilder`. On ANY compile failure (or a failed
+/// `make_shader`) we degrade to `shader.fallback` solid — never panic,
+/// since the SkSL source is untrusted.
+fn draw_shader_rect(
+    canvas: &skia_safe::Canvas,
+    shader_cache: &mut ShaderCache,
+    rect: Rect,
+    radii: BorderRadii,
+    spec: &jian_core::render::ShaderSpec,
+    stroke: Option<&jian_core::render::StrokeOp>,
+) {
+    let is_rounded = radii != BorderRadii::zero();
+    let radii_arr = [
+        SkPoint::new(radii.tl, radii.tl),
+        SkPoint::new(radii.tr, radii.tr),
+        SkPoint::new(radii.br, radii.br),
+        SkPoint::new(radii.bl, radii.bl),
+    ];
+
+    let shader = build_shader(shader_cache, spec);
+    let mut paint = SkPaint::default();
+    paint.set_anti_alias(true);
+    paint.set_style(PaintStyle::Fill);
+    paint.set_alpha_f(spec.opacity.clamp(0.0, 1.0));
+    match shader {
+        Some(s) => {
+            paint.set_shader(s);
+        }
+        None => {
+            // Compile failed (or no shader produced) — visible solid
+            // fallback so the node still paints.
+            let c = to_sk_color(spec.fallback);
+            paint.set_color4f(c, None);
+        }
+    }
+    if is_rounded {
+        let rrect = RRect::new_rect_radii(to_sk_rect(rect), &radii_arr);
+        canvas.draw_rrect(rrect, &paint);
+    } else {
+        canvas.draw_rect(to_sk_rect(rect), &paint);
+    }
+
+    if let Some(stroke) = stroke {
+        let mut p = SkPaint::new(to_sk_color(stroke.color), None);
+        p.set_style(PaintStyle::Stroke);
+        p.set_stroke_width(stroke.width);
+        p.set_anti_alias(true);
+        if is_rounded {
+            let rrect = RRect::new_rect_radii(to_sk_rect(rect), &radii_arr);
+            canvas.draw_rrect(rrect, &p);
+        } else {
+            canvas.draw_rect(to_sk_rect(rect), &p);
+        }
+    }
+}
+
+/// Compile + bind a shader spec into a `skia_safe::Shader`, or `None` on
+/// any failure. Cached compile lives in `shader_cache`; uniform binding
+/// errors (a name the program doesn't declare, or an arity mismatch) are
+/// tolerated — a best-effort bind still yields a usable shader.
+fn build_shader(
+    shader_cache: &mut ShaderCache,
+    spec: &jian_core::render::ShaderSpec,
+) -> Option<skia_safe::Shader> {
+    use skia_safe::runtime_effect::RuntimeShaderBuilder;
+    // `RuntimeEffect` is an RCHandle — this clone is a refcount bump, not
+    // a recompile.
+    let effect = shader_cache.get_or_compile(&spec.sksl)?;
+    let mut builder = RuntimeShaderBuilder::new(effect);
+    for u in &spec.uniforms {
+        // Ignore bind errors (undeclared name / wrong arity) so one bad
+        // uniform doesn't sink the whole fill.
+        let _ = builder.set_uniform_float(&u.name, &u.values);
+    }
+    builder.make_shader(&skia_safe::Matrix::default())
+}
+
+fn draw_shadowed_rect(
+    canvas: &skia_safe::Canvas,
+    rect: Rect,
+    radii: BorderRadii,
+    shadow: &jian_core::render::ShadowSpec,
+) {
+    // Draw a blurred copy of the shape in `shadow.color` offset by
+    // (dx, dy). The foreground fill lands via a subsequent draw-op.
+    let c4 = to_sk_color(shadow.color);
+    let mut paint = SkPaint::new(c4, None);
+    paint.set_anti_alias(true);
+    paint.set_style(PaintStyle::Fill);
+    // Skia's blur filter uses sigma; CSS-ish `blur` is ~= sigma * 2.
+    let sigma = (shadow.blur * 0.5).max(0.0);
+    if sigma > 0.0 {
+        paint.set_mask_filter(skia_safe::MaskFilter::blur(BlurStyle::Normal, sigma, None));
+    }
+    let offset_rect = Rect::new(
+        jian_core::geometry::point(rect.min_x() + shadow.dx, rect.min_y() + shadow.dy),
+        rect.size,
+    );
+    let is_rounded = radii != BorderRadii::zero();
+    if is_rounded {
+        let sk_rect = to_sk_rect(offset_rect);
+        let radii_arr = [
+            SkPoint::new(radii.tl, radii.tl),
+            SkPoint::new(radii.tr, radii.tr),
+            SkPoint::new(radii.br, radii.br),
+            SkPoint::new(radii.bl, radii.bl),
+        ];
+        let rrect = RRect::new_rect_radii(sk_rect, &radii_arr);
+        canvas.draw_rrect(rrect, &paint);
+    } else {
+        canvas.draw_rect(to_sk_rect(offset_rect), &paint);
+    }
+}
+
+fn draw_rect(canvas: &skia_safe::Canvas, r: Rect, paint: &Paint) {
+    let rr: SkRect = to_sk_rect(r);
+    if let Some(fill) = paint.fill {
+        let mut p = SkPaint::new(to_sk_color(fill), None);
+        p.set_alpha_f(combined_alpha(fill, paint.opacity));
+        p.set_anti_alias(true);
+        p.set_style(PaintStyle::Fill);
+        canvas.draw_rect(rr, &p);
+    }
+    if let Some(ref stroke) = paint.stroke {
+        let mut p = SkPaint::new(to_sk_color(stroke.color), None);
+        p.set_style(PaintStyle::Stroke);
+        p.set_stroke_width(stroke.width);
+        p.set_alpha_f(combined_alpha(stroke.color, paint.opacity));
+        p.set_anti_alias(true);
+        canvas.draw_rect(rr, &p);
+    }
+}
+
+fn draw_rrect(canvas: &skia_safe::Canvas, r: Rect, radii: BorderRadii, paint: &Paint) {
+    let sk_rect = to_sk_rect(r);
+    let radii_arr = [
+        SkPoint::new(radii.tl, radii.tl),
+        SkPoint::new(radii.tr, radii.tr),
+        SkPoint::new(radii.br, radii.br),
+        SkPoint::new(radii.bl, radii.bl),
+    ];
+    let rrect = RRect::new_rect_radii(sk_rect, &radii_arr);
+    if let Some(fill) = paint.fill {
+        let mut p = SkPaint::new(to_sk_color(fill), None);
+        p.set_alpha_f(combined_alpha(fill, paint.opacity));
+        p.set_anti_alias(true);
+        p.set_style(PaintStyle::Fill);
+        canvas.draw_rrect(rrect, &p);
+    }
+    if let Some(ref stroke) = paint.stroke {
+        let mut p = SkPaint::new(to_sk_color(stroke.color), None);
+        p.set_style(PaintStyle::Stroke);
+        p.set_stroke_width(stroke.width);
+        p.set_alpha_f(combined_alpha(stroke.color, paint.opacity));
+        p.set_anti_alias(true);
+        canvas.draw_rrect(rrect, &p);
+    }
+}
+
+fn combined_alpha(color: jian_core::scene::Color, opacity: f32) -> f32 {
+    (f32::from(color.a()) / 255.0) * opacity.clamp(0.0, 1.0)
+}
+
+// Convenience: keeps `BlurStyle` / `MaskFilter` imported for future
+// stroke-expansion work without triggering an unused-import warning.
+#[allow(dead_code)]
+fn _unused_keeping_imports() {
+    let _ = BlurStyle::Normal;
+    let _ = MaskFilter::blur(BlurStyle::Normal, 1.0, None);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use jian_core::geometry::{point, rect, size};
+    use jian_core::render::PathCommand;
+    use jian_core::scene::Color;
+
+    fn draw_blue_rect() -> SkiaSurface {
+        let mut backend = SkiaBackend::new();
+        let mut surface = backend.new_surface(size(64.0, 64.0));
+        backend.begin_frame(&mut surface, 0xffffffff);
+        backend.draw(&DrawOp::Rect {
+            rect: rect(8.0, 8.0, 48.0, 48.0),
+            paint: Paint::solid(Color::rgb(0x1e, 0x88, 0xe5)),
+        });
+        backend.end_frame(&mut surface);
+        surface
+    }
+
+    #[test]
+    fn authored_color_alpha_multiplies_paint_opacity() {
+        let color = Color::rgba(0x7c, 0x3a, 0xed, 0x59);
+        assert!((combined_alpha(color, 0.5) - (0x59 as f32 / 255.0 * 0.5)).abs() < 1e-6);
+
+        let mut backend = SkiaBackend::new();
+        let mut surface = backend.new_surface(size(8.0, 8.0));
+        backend.begin_frame(&mut surface, 0x00000000);
+        backend.draw(&DrawOp::Rect {
+            rect: rect(0.0, 0.0, 8.0, 8.0),
+            paint: Paint {
+                fill: Some(color),
+                stroke: None,
+                opacity: 0.5,
+            },
+        });
+        backend.end_frame(&mut surface);
+
+        let mut pixels = vec![0u8; 8 * 8 * 4];
+        assert!(surface.read_rgba8(&mut pixels));
+        assert!(
+            (0x2c..=0x2d).contains(&pixels[3]),
+            "expected alpha 0x2c/0x2d, got {:#04x}",
+            pixels[3]
+        );
+    }
+
+    #[test]
+    fn rect_emits_png() {
+        let mut s = draw_blue_rect();
+        let png = s.encode_png().unwrap();
+        assert!(png.len() > 100);
+    }
+
+    #[test]
+    fn rounded_rect_draws_through_trait() {
+        let mut backend = SkiaBackend::new();
+        let mut surface = backend.new_surface(size(32.0, 32.0));
+        backend.begin_frame(&mut surface, 0);
+        backend.draw(&DrawOp::RoundedRect {
+            rect: rect(4.0, 4.0, 24.0, 24.0),
+            radii: BorderRadii::uniform(4.0),
+            paint: Paint::solid(Color::rgb(0xff, 0x00, 0x00)),
+        });
+        backend.end_frame(&mut surface);
+        assert!(surface.encode_png().is_some());
+    }
+
+    #[test]
+    fn path_triangle_draws_through_trait() {
+        let mut backend = SkiaBackend::new();
+        let mut surface = backend.new_surface(size(32.0, 32.0));
+        backend.begin_frame(&mut surface, 0);
+        let cmds: Vec<PathCommand> = vec![
+            PathCommand::MoveTo(point(4.0, 28.0)),
+            PathCommand::LineTo(point(28.0, 28.0)),
+            PathCommand::LineTo(point(16.0, 4.0)),
+            PathCommand::Close,
+        ];
+        backend.draw(&DrawOp::Path {
+            commands: cmds,
+            paint: Paint::solid(Color::rgb(0x00, 0xff, 0x00)),
+        });
+        backend.end_frame(&mut surface);
+        assert!(surface.encode_png().is_some());
+    }
+
+    #[test]
+    fn clip_transform_save_pop_cycle() {
+        // A clip inside a transform inside a save should not panic on
+        // end_frame — and the restore-to-count should clean up a
+        // missing pop.
+        let mut backend = SkiaBackend::new();
+        let mut surface = backend.new_surface(size(32.0, 32.0));
+        backend.begin_frame(&mut surface, 0xffffffff);
+        backend.push_transform(&Affine2::translation(4.0, 4.0));
+        backend.push_clip(rect(0.0, 0.0, 16.0, 16.0));
+        backend.draw(&DrawOp::Rect {
+            rect: rect(0.0, 0.0, 100.0, 100.0),
+            paint: Paint::solid(Color::rgb(0, 0, 0)),
+        });
+        backend.pop();
+        backend.pop();
+        backend.end_frame(&mut surface);
+        assert!(surface.encode_png().is_some());
+    }
+
+    #[test]
+    fn apply_blur_then_push_layer_consumes_filter() {
+        let mut backend = SkiaBackend::new();
+        let mut surface = backend.new_surface(size(32.0, 32.0));
+        backend.begin_frame(&mut surface, 0xffffffff);
+        backend.apply_blur(4.0);
+        assert!(backend.pending_filter.is_some());
+        backend.push_layer(rect(0.0, 0.0, 32.0, 32.0));
+        assert!(backend.pending_filter.is_none());
+        backend.draw(&DrawOp::Rect {
+            rect: rect(4.0, 4.0, 24.0, 24.0),
+            paint: Paint::solid(Color::rgb(0xff, 0, 0)),
+        });
+        backend.pop_layer();
+        backend.end_frame(&mut surface);
+        assert!(surface.encode_png().is_some());
+    }
+
+    #[cfg(feature = "textlayout")]
+    #[test]
+    fn paragraph_builder_renders_cjk_under_feature() {
+        use jian_core::render::{TextAlign, TextRun};
+        use jian_core::scene::Color as JianColor;
+        let mut backend = SkiaBackend::new();
+        let mut surface = backend.new_surface(size(200.0, 60.0));
+        backend.begin_frame(&mut surface, 0xffffffff);
+        backend.draw(&DrawOp::Text(TextRun {
+            content: "你好世界".to_owned(),
+            origin: jian_core::geometry::point(8.0, 8.0),
+            color: JianColor::rgb(0, 0, 0),
+            font_family: String::new(),
+            font_size: 18.0,
+            font_weight: 400,
+            line_height: 0.0,
+            max_width: 180.0,
+            align: TextAlign::Start,
+        }));
+        backend.end_frame(&mut surface);
+        // ParagraphBuilder shouldn't panic on CJK and should produce
+        // a valid PNG. Single-line fallback fakes the same output
+        // for ASCII; the CJK path proves the textlayout feature
+        // actually engaged.
+        assert!(surface.encode_png().is_some());
+    }
+
+    #[test]
+    fn data_url_image_draws_through_trait() {
+        // 1x1 transparent PNG (smallest valid).
+        let png = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=";
+        let url = format!("data:image/png;base64,{}", png);
+        let mut backend = SkiaBackend::new();
+        let mut surface = backend.new_surface(size(32.0, 32.0));
+        backend.begin_frame(&mut surface, 0xffffffff);
+        backend.draw(&DrawOp::Image {
+            source: ImageSource::DataUrl(url),
+            dst: rect(4.0, 4.0, 24.0, 24.0),
+            opacity: 1.0,
+        });
+        backend.end_frame(&mut surface);
+        assert!(surface.encode_png().is_some());
+    }
+
+    #[test]
+    fn missing_image_falls_back_to_grey() {
+        let mut backend = SkiaBackend::new();
+        let mut surface = backend.new_surface(size(32.0, 32.0));
+        backend.begin_frame(&mut surface, 0xffffffff);
+        backend.draw(&DrawOp::Image {
+            source: ImageSource::Url("https://nope.example/x.png".into()),
+            dst: rect(4.0, 4.0, 24.0, 24.0),
+            opacity: 1.0,
+        });
+        backend.end_frame(&mut surface);
+        assert!(surface.encode_png().is_some());
+    }
+
+    #[test]
+    fn radial_gradient_rect_draws_through_trait() {
+        use jian_core::render::{GradientStop, RadialGradient};
+        let mut backend = SkiaBackend::new();
+        let mut surface = backend.new_surface(size(64.0, 64.0));
+        backend.begin_frame(&mut surface, 0xffffffff);
+        backend.draw(&DrawOp::RadialGradientRect {
+            rect: rect(0.0, 0.0, 64.0, 64.0),
+            radii: BorderRadii::zero(),
+            gradient: RadialGradient {
+                cx: 0.5,
+                cy: 0.5,
+                radius: 0.5,
+                stops: vec![
+                    GradientStop {
+                        offset: 0.0,
+                        color: Color::rgb(0xff, 0xff, 0xff),
+                    },
+                    GradientStop {
+                        offset: 1.0,
+                        color: Color::rgb(0x00, 0x00, 0x00),
+                    },
+                ],
+                opacity: 1.0,
+            },
+            stroke: None,
+        });
+        backend.end_frame(&mut surface);
+        let png = surface.encode_png().expect("png");
+        assert!(png.len() > 100);
+    }
+
+    #[test]
+    fn mesh_gradient_rect_draws_through_trait() {
+        use jian_core::render::MeshGradient;
+        let mut backend = SkiaBackend::new();
+        let mut surface = backend.new_surface(size(64.0, 64.0));
+        backend.begin_frame(&mut surface, 0xffffffff);
+        // 2x2 corner mesh: red / green / blue / yellow.
+        backend.draw(&DrawOp::MeshGradientRect {
+            rect: rect(0.0, 0.0, 64.0, 64.0),
+            radii: BorderRadii::uniform(8.0),
+            gradient: MeshGradient {
+                rows: 2,
+                cols: 2,
+                colors: vec![
+                    Color::rgb(0xff, 0x00, 0x00),
+                    Color::rgb(0x00, 0xff, 0x00),
+                    Color::rgb(0x00, 0x00, 0xff),
+                    Color::rgb(0xff, 0xff, 0x00),
+                ],
+                opacity: 1.0,
+            },
+            stroke: None,
+        });
+        backend.end_frame(&mut surface);
+        let png = surface.encode_png().expect("png");
+        assert!(png.len() > 100);
+    }
+
+    #[test]
+    fn mesh_gradient_is_actually_interpolated_not_flat() {
+        // PROOF: a 2x2 R/G/B/Y mesh must Gouraud-interpolate, so the
+        // CENTRE pixel is a blend of all four corners (≈ mid-tone on every
+        // channel) and is NOT equal to any single corner colour. A flat
+        // first-stop fallback would make the centre exactly one corner.
+        use jian_core::render::MeshGradient;
+        let mut backend = SkiaBackend::new();
+        let w = 64i32;
+        let h = 64i32;
+        let mut surface = backend.new_surface(size(w as f32, h as f32));
+        backend.begin_frame(&mut surface, 0xff000000); // opaque black clear
+        backend.draw(&DrawOp::MeshGradientRect {
+            rect: rect(0.0, 0.0, w as f32, h as f32),
+            radii: BorderRadii::zero(), // no clip rounding so centre is mesh
+            gradient: MeshGradient {
+                rows: 2,
+                cols: 2,
+                // TL=red, TR=green, BL=blue, BR=yellow
+                colors: vec![
+                    Color::rgb(0xff, 0x00, 0x00),
+                    Color::rgb(0x00, 0xff, 0x00),
+                    Color::rgb(0x00, 0x00, 0xff),
+                    Color::rgb(0xff, 0xff, 0x00),
+                ],
+                opacity: 1.0,
+            },
+            stroke: None,
+        });
+        backend.end_frame(&mut surface);
+
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        assert!(surface.read_rgba8(&mut buf), "read_rgba8 failed");
+        let px = |x: i32, y: i32| -> (u8, u8, u8, u8) {
+            let i = ((y * w + x) * 4) as usize;
+            (buf[i], buf[i + 1], buf[i + 2], buf[i + 3])
+        };
+
+        // Corners (1px inset) should still read close to their pure colour.
+        let tl = px(1, 1);
+        let tr = px(w - 2, 1);
+        let bl = px(1, h - 2);
+        let br = px(w - 2, h - 2);
+        assert!(tl.0 > 200 && tl.1 < 60 && tl.2 < 60, "TL not red: {:?}", tl);
+        assert!(
+            tr.0 < 60 && tr.1 > 200 && tr.2 < 60,
+            "TR not green: {:?}",
+            tr
+        );
+        assert!(
+            bl.0 < 60 && bl.1 < 60 && bl.2 > 200,
+            "BL not blue: {:?}",
+            bl
+        );
+        assert!(
+            br.0 > 200 && br.1 > 200 && br.2 < 60,
+            "BR not yellow: {:?}",
+            br
+        );
+
+        // Centre must be an interpolated blend, NOT any single corner solid.
+        // Triangulation is [TL,TR,BL] + [TR,BR,BL]; the shared diagonal runs
+        // TR(green)->BL(blue), and the geometric centre sits on that diagonal,
+        // so the centre is a green<->blue blend (G,B mid; R near 0 because red
+        // only lives at the two off-diagonal corners TL/BR). This is correct
+        // Gouraud behaviour for a triangle mesh — a flat first-stop fallback
+        // would instead paint the centre exactly one corner colour.
+        let c = px(w / 2, h / 2);
+        assert!(
+            c.1 > 60 && c.1 < 200 && c.2 > 60 && c.2 < 200,
+            "centre is not a green/blue diagonal blend (suggests flat fallback): {:?}",
+            c
+        );
+        // Centre differs from every corner -> not a first-stop solid.
+        for (name, corner) in [("TL", tl), ("TR", tr), ("BL", bl), ("BR", br)] {
+            assert!(
+                (c.0 as i32 - corner.0 as i32).abs()
+                    + (c.1 as i32 - corner.1 as i32).abs()
+                    + (c.2 as i32 - corner.2 as i32).abs()
+                    > 60,
+                "centre {:?} too close to corner {} {:?} (flat fill?)",
+                c,
+                name,
+                corner
+            );
+        }
+
+        // Edge midpoints must be two-colour blends along that edge.
+        let top_mid = px(w / 2, 1); // red↔green
+        assert!(
+            top_mid.0 > 60 && top_mid.1 > 60 && top_mid.2 < 80,
+            "top edge midpoint not a red/green blend: {:?}",
+            top_mid
+        );
+        let left_mid = px(1, h / 2); // red↔blue
+        assert!(
+            left_mid.0 > 60 && left_mid.2 > 60 && left_mid.1 < 80,
+            "left edge midpoint not a red/blue blend: {:?}",
+            left_mid
+        );
+    }
+
+    #[test]
+    fn shader_rect_valid_sksl_paints_red() {
+        // A trivial valid SkSL program returning opaque red must paint
+        // red across the rect (NOT the fallback colour).
+        use jian_core::render::ShaderSpec;
+        let mut backend = SkiaBackend::new();
+        let w = 32i32;
+        let h = 32i32;
+        let mut surface = backend.new_surface(size(w as f32, h as f32));
+        backend.begin_frame(&mut surface, 0xff000000);
+        backend.draw(&DrawOp::ShaderRect {
+            rect: rect(0.0, 0.0, w as f32, h as f32),
+            radii: BorderRadii::zero(),
+            shader: ShaderSpec {
+                sksl: "half4 main(float2 p){ return half4(1.0, 0.0, 0.0, 1.0); }".into(),
+                uniforms: vec![],
+                opacity: 1.0,
+                // Fallback is green — proves the red came from the shader,
+                // not the fallback path.
+                fallback: Color::rgb(0x00, 0xff, 0x00),
+            },
+            stroke: None,
+        });
+        backend.end_frame(&mut surface);
+
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        assert!(surface.read_rgba8(&mut buf), "read_rgba8 failed");
+        let i = ((h / 2 * w + w / 2) * 4) as usize;
+        let (r, g, b) = (buf[i], buf[i + 1], buf[i + 2]);
+        assert!(
+            r > 200 && g < 60 && b < 60,
+            "centre should be shader red, got ({r},{g},{b})"
+        );
+        // A valid program must have compiled exactly once.
+        assert_eq!(backend.shader_compile_count(), 1);
+    }
+
+    #[test]
+    fn shader_rect_invalid_sksl_falls_back_without_panic() {
+        // Garbage SkSL must NOT panic; it degrades to the fallback solid.
+        use jian_core::render::ShaderSpec;
+        let mut backend = SkiaBackend::new();
+        let w = 32i32;
+        let h = 32i32;
+        let mut surface = backend.new_surface(size(w as f32, h as f32));
+        backend.begin_frame(&mut surface, 0xff000000);
+        backend.draw(&DrawOp::ShaderRect {
+            rect: rect(0.0, 0.0, w as f32, h as f32),
+            radii: BorderRadii::zero(),
+            shader: ShaderSpec {
+                sksl: "this is not valid sksl at all {{{".into(),
+                uniforms: vec![],
+                opacity: 1.0,
+                fallback: Color::rgb(0x00, 0x00, 0xff), // blue fallback
+            },
+            stroke: None,
+        });
+        backend.end_frame(&mut surface);
+
+        let mut buf = vec![0u8; (w * h * 4) as usize];
+        assert!(surface.read_rgba8(&mut buf), "read_rgba8 failed");
+        let i = ((h / 2 * w + w / 2) * 4) as usize;
+        let (r, g, b) = (buf[i], buf[i + 1], buf[i + 2]);
+        assert!(
+            b > 200 && r < 60 && g < 60,
+            "centre should be blue fallback, got ({r},{g},{b})"
+        );
+    }
+
+    #[test]
+    fn shader_compile_is_cached_across_frames() {
+        // PERF PROOF: drawing the SAME source many times compiles ONCE.
+        use jian_core::render::ShaderSpec;
+        let mut backend = SkiaBackend::new();
+        let mut surface = backend.new_surface(size(16.0, 16.0));
+        let spec = ShaderSpec {
+            sksl: "half4 main(float2 p){ return half4(0.2, 0.4, 0.6, 1.0); }".into(),
+            uniforms: vec![],
+            opacity: 1.0,
+            fallback: Color::rgb(0x80, 0x80, 0x80),
+        };
+        for _ in 0..10 {
+            backend.begin_frame(&mut surface, 0xff000000);
+            backend.draw(&DrawOp::ShaderRect {
+                rect: rect(0.0, 0.0, 16.0, 16.0),
+                radii: BorderRadii::zero(),
+                shader: spec.clone(),
+                stroke: None,
+            });
+            backend.end_frame(&mut surface);
+        }
+        assert_eq!(
+            backend.shader_compile_count(),
+            1,
+            "same source must compile exactly once across 10 frames"
+        );
+
+        // A second, distinct source bumps the count to 2.
+        let spec2 = ShaderSpec {
+            sksl: "half4 main(float2 p){ return half4(0.6, 0.4, 0.2, 1.0); }".into(),
+            ..spec.clone()
+        };
+        backend.begin_frame(&mut surface, 0xff000000);
+        backend.draw(&DrawOp::ShaderRect {
+            rect: rect(0.0, 0.0, 16.0, 16.0),
+            radii: BorderRadii::zero(),
+            shader: spec2,
+            stroke: None,
+        });
+        backend.end_frame(&mut surface);
+        assert_eq!(backend.shader_compile_count(), 2);
+    }
+
+    #[test]
+    fn apply_shadow_then_push_layer_consumes_filter() {
+        let mut backend = SkiaBackend::new();
+        let mut surface = backend.new_surface(size(32.0, 32.0));
+        backend.begin_frame(&mut surface, 0xffffffff);
+        backend.apply_shadow(&ShadowSpec {
+            color: Color::rgba(0, 0, 0, 128),
+            dx: 2.0,
+            dy: 2.0,
+            blur: 3.0,
+            spread: 0.0,
+        });
+        assert!(backend.pending_filter.is_some());
+        backend.push_layer(rect(0.0, 0.0, 32.0, 32.0));
+        assert!(backend.pending_filter.is_none());
+        backend.draw(&DrawOp::Rect {
+            rect: rect(4.0, 4.0, 24.0, 24.0),
+            paint: Paint::solid(Color::rgb(0, 0, 0xff)),
+        });
+        backend.pop_layer();
+        backend.end_frame(&mut surface);
+        assert!(surface.encode_png().is_some());
+    }
+}

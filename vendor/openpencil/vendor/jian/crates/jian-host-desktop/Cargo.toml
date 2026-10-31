@@ -1,0 +1,173 @@
+[package]
+name         = "jian-host-desktop"
+version      = { workspace = true }
+edition      = { workspace = true }
+rust-version = { workspace = true }
+license      = { workspace = true }
+repository   = { workspace = true }
+authors      = { workspace = true }
+description  = "winit-based desktop host for the Jian runtime"
+
+[features]
+# Default = pure-function translators + in-memory services. No winit
+# event loop is started unless a `run` helper is called, and no
+# platform-specific surface feature is picked up automatically so CI
+# stays windowless. **`dev-asp` deliberately stays out of `default`**
+# so production release builds don't link `jian-asp` (Plan 18 Task 0
+# physical isolation; Plan 22 Task 10 CI assertion tests this).
+default = []
+
+# Dev-only Agent Shell Protocol (Plan 18). Pulls in `jian-asp` and
+# enables the **full** verb surface (find / inspect / snapshot /
+# audit / state writes / expression evaluator) for debugging and
+# UI testing. Production hosts must NOT enable this feature; the
+# CI isolation job (`ci-action-surface-isolation.yml`) fails any PR
+# whose `cargo tree` for a release host includes `jian-asp` via
+# `dev-asp`.
+dev-asp = ["dep:jian-asp", "jian-asp/dev-asp"]
+
+# Production-safe Agent Shell Protocol (Plan 18 ASP prod mode / C3).
+# Same `jian-asp` dep, but activates the lean **production** verb
+# surface (`handshake` / `list_actions` / `tap` / `type` / `scroll`
+# / `swipe` / `exit`) — no structural introspection. Built for
+# token-efficient AI driving against shipping apps. Mutually
+# exclusive with `dev-asp` is NOT enforced at the cargo level (a
+# stand-alone build can enable both for testing the runtime
+# `Mode::{Dev, Prod}` switch), but production binaries should
+# enable only `prod-asp`.
+prod-asp = ["dep:jian-asp", "jian-asp/prod-asp"]
+
+# Opt-in to the real event-loop run helper. Pulls in `softbuffer` for
+# CPU-side pixel presentation (no per-platform GPU context needed).
+run = ["dep:softbuffer"]
+
+# Native OS feature flags for the optional integrations (added when
+# the implementations land):
+clipboard = ["dep:arboard"]
+# `reqwest::blocking::Client`-backed `NetworkClient`. Off by default so
+# the headless / CI fast path doesn't pull in TLS + the reqwest
+# dependency tree. Activate this for any host that exposes the
+# runtime's `http_request` action. (WebSocket support stays on
+# `connect_websocket`'s default `Err(...)` path until a follow-up
+# wires `tokio-tungstenite`.) `futures-channel` provides the
+# oneshot used to bridge blocking IO on a worker thread back to
+# the async trait surface without blocking the executor.
+network = ["dep:reqwest", "dep:futures-channel"]
+# `rfd::MessageDialog`-backed `FeedbackSink + AsyncFeedback`. Off by
+# default — enables the `toast` / `alert` / `confirm` actions on
+# desktop. `rfd` 0.14 wraps platform-native dialogs (NSAlert /
+# Win32 / GTK / KDE) without bundling its own widget toolkit.
+feedback = ["dep:rfd"]
+# Generic GitHub-Releases-backed `Updater` impl over `self_update`.
+# Off by default — `self_update` pulls in `reqwest` (rustls) +
+# `zip` / `tar` decoders. Sparkle (macOS) and AppImageUpdate (Linux)
+# remain trait-level deferred; this feature ships a portable
+# replacement that's good enough for shipping while the per-platform
+# backends mature.
+updater = ["dep:self_update", "dep:semver"]
+# Native menus via `muda` — cross-platform (macOS / Windows / Linux).
+# Phase 1 ships a pure menu *spec* (`MenuSpec`) so authors can
+# declare File / Edit / View entries; the actual `muda::Menu`
+# wiring activates when the host opens its window. Pulled in
+# under a feature flag because the shared library footprint isn't
+# needed for headless / CI builds.
+menus = ["dep:muda"]
+
+# AI Action Surface integration. Wires `jian-action-surface`'s
+# `Bridge::Drain` into the run-loop's per-frame `about_to_wait` tick:
+# each pending MCP request is serviced against an `ActionSurface`
+# refreshed on every hot-reload. Off by default — only `jian dev
+# --mcp` (or a host author who explicitly opts in) pulls in the
+# rmcp/tokio shared libs.
+mcp = ["dep:jian-action-surface"]
+
+# Real-shaping text measurement via `jian-skia::SkiaMeasure`. When on,
+# `DesktopHost::with_skia_measure()` (and `install_skia_measure`) swap
+# the runtime's `MeasureBackend` to the Skia paragraph shaper, so
+# layout sees the same widths the renderer paints — fixes CJK / emoji
+# undercounts and per-segment style mismatches that the default
+# `EstimateBackend` glosses over. Off by default — pulls in
+# skia-safe's textlayout feature (ICU + HarfBuzz, ~15 MB).
+textlayout = ["jian-skia/textlayout"]
+
+[dependencies]
+jian-core       = { path = "../jian-core" }
+jian-ops-schema = { path = "../jian-ops-schema" }
+jian-skia       = { path = "../jian-skia" }
+jian-action-surface = { path = "../jian-action-surface", optional = true, features = ["mcp"] }
+jian-asp        = { path = "../jian-asp", optional = true, default-features = false }
+winit           = "0.30"
+async-trait     = "0.1"
+serde           = { workspace = true }
+serde_json      = { workspace = true }
+arboard         = { version = "3", optional = true }
+softbuffer      = { version = "0.4", optional = true }
+muda            = { version = "0.13", optional = true }
+reqwest         = { version = "0.12", optional = true, default-features = false, features = ["rustls-tls", "json", "gzip", "blocking"] }
+futures-channel = { version = "0.3", optional = true }
+futures         = "0.3"
+rfd             = { version = "0.14", optional = true }
+self_update     = { version = "0.41", optional = true, default-features = false, features = ["rustls", "compression-flate2", "compression-zip-deflate"] }
+# `is_strictly_newer` uses `semver::Version` to compare release
+# versions correctly across prerelease / build-metadata edge cases
+# (the previous hand-rolled split-on-dot path mis-ordered
+# `1.0.0-rc.1` vs `1.0.0`).
+semver          = { version = "1", optional = true }
+
+# macOS-only: drive `NSApp.setApplicationIconImage:` so the runtime can
+# update the Dock icon for unbundled binaries (winit's `set_window_icon`
+# is a no-op on macOS — the Dock icon comes from the .app bundle's
+# .icns by default; we override it from the schema's `app.icon` PNG).
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
+objc2-app-kit = { version = "0.2", features = ["NSApplication", "NSImage"] }
+# `NSAppleEventManager` + `NSAppleEventDescriptor` features added for
+# Plan 8 §T8 deep-link receiver — registers a `kAEGetURL` handler so
+# `open jian://...` URLs land in `app_delegate::dispatch_url`.
+objc2-foundation = { version = "0.2", features = [
+    "NSData",
+    "NSString",
+    "NSAppleEventManager",
+    "NSAppleEventDescriptor",
+] }
+
+# Plan 8 §T8 Windows leg: hidden message-only window + WindowProc
+# for `WM_COPYDATA` deep-link forwarding, plus named-mutex single-
+# instance probe so a secondary `jian.exe` invocation can hand
+# `jian://...` / `.op` argv to the running primary and exit.
+[target.'cfg(target_os = "windows")'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Storage_FileSystem",
+    "Win32_System_DataExchange",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Pipes",
+    "Win32_System_Threading",
+    "Win32_UI_WindowsAndMessaging",
+    # `Win32_Graphics_Gdi` gates `WNDCLASSEXW` (its `hbrBackground`
+    # is `HBRUSH`, owned by the GDI feature seam in 0.61).
+    # `COPYDATASTRUCT` lives under `Win32_System_DataExchange`.
+    # `CreateMutexW` requires `Win32_Security` for its
+    # `SECURITY_ATTRIBUTES` parameter.
+    # `SYNCHRONIZE` (the OpenEventW access-mask constant) lives
+    # under `Win32_Storage_FileSystem` in windows-sys 0.61.
+    # Plan 8 §T8 named-pipe transport: `Win32_Security_Authorization`
+    # for `ConvertStringSecurityDescriptorToSecurityDescriptorW` /
+    # `ConvertSidToStringSidW` (DACL building), and
+    # `Win32_System_Pipes` for `CreateNamedPipeW` /
+    # `ConnectNamedPipe` / pipe-mode flags.
+    "Win32_Graphics_Gdi",
+] }
+
+[dev-dependencies.futures]
+version = "0.3"
+
+[dev-dependencies.tempfile]
+version = "3"
+
+[[bin]]
+name = "jian-player"
+path = "src/bin/jian-player.rs"

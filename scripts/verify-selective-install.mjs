@@ -8,7 +8,7 @@ import { openPencil, platforms } from './platforms.mjs'
 
 const artifactRoot = resolve(process.argv[2] ?? 'artifacts')
 const reports = await readReports(artifactRoot)
-const expectedNames = new Set(['@zseven-w/dsh-openpencil', ...platforms.map(platform => platform.packageName)])
+const expectedNames = new Set(['@darkskygit/dsh-openpencil', ...platforms.map(platform => platform.packageName)])
 if (reports.length !== expectedNames.size) {
   throw new Error(`expected exactly ${expectedNames.size} package reports, found ${reports.length}`)
 }
@@ -19,7 +19,7 @@ for (const report of reports) {
   await verifyReportIntegrity(report)
   reportsByName.set(report.name, report)
 }
-const rootReport = reportsByName.get('@zseven-w/dsh-openpencil')
+const rootReport = reportsByName.get('@darkskygit/dsh-openpencil')
 if (rootReport === undefined) throw new Error('root package tarball is missing')
 for (const report of reports) {
   if (report.version !== rootReport.version) throw new Error(`${report.name} version differs from root ${rootReport.version}`)
@@ -60,7 +60,7 @@ async function verifySelection(platform, dependencies, root) {
       throw new Error(`${platform.id}: expected ${expected}, installed ${installed.join(', ') || 'nothing'}`)
     }
     const runtime = resolveInstalledRuntime(directory, platform)
-    const packageRoot = await realpath(join(directory, 'node_modules', '@zseven-w', expected))
+    const packageRoot = await realpath(join(directory, 'node_modules', '@darkskygit', expected))
     const expectedRuntime = {
       binary: join(packageRoot, 'bin', platform.binaryName),
       webBundleDir: join(packageRoot, 'bin', 'web-bundle'),
@@ -134,7 +134,7 @@ async function createConsumer(optionalDependencies, root) {
     private: true,
     version: '0.0.0',
     dependencies: {
-      '@zseven-w/dsh-openpencil': pathToFileURL(join(root.directory, root.filename)).href,
+      '@darkskygit/dsh-openpencil': pathToFileURL(join(root.directory, root.filename)).href,
     },
     optionalDependencies,
   }, null, 2) + '\n')
@@ -168,7 +168,7 @@ function runResolver(directory, platform, optional) {
   const source = [
     "const { dirname, join } = require('node:path')",
     "const { pathToFileURL } = require('node:url')",
-    "const manifest = require.resolve('@zseven-w/dsh-openpencil/package.json', { paths: [process.cwd()] })",
+    "const manifest = require.resolve('@darkskygit/dsh-openpencil/package.json', { paths: [process.cwd()] })",
     "import(pathToFileURL(join(dirname(manifest), 'lib', 'editor-runtime.js')).href).then(mod => {",
     `  const value = mod.${method}({ platform: ${JSON.stringify(platform.os)}, arch: ${JSON.stringify(platform.cpu)}, env: {} })`,
     "  process.stdout.write(value === undefined ? '' : JSON.stringify(value))",
@@ -181,7 +181,7 @@ function runResolver(directory, platform, optional) {
 
 async function installedRuntimePackages(directory) {
   try {
-    return (await readdir(join(directory, 'node_modules', '@zseven-w')))
+    return (await readdir(join(directory, 'node_modules', '@darkskygit')))
       .filter(name => name.startsWith('dsh-openpencil-') && name !== 'dsh-openpencil')
       .sort()
   } catch {

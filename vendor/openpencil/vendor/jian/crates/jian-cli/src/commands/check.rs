@@ -1,0 +1,249 @@
+//! `jian check PATH [--json]`.
+//!
+//! Exit codes:
+//! - `0` — parse succeeded with no warnings.
+//! - `1` — parse succeeded but produced one or more warnings.
+//! - `2` — parse / validation error (unsupported version, malformed
+//!   JSON, …). Caller-visible `anyhow::Error`.
+
+use crate::diagnostic_render::{
+    push_diagnostic, render_projection_warning, render_warnings, Severity, Span, Style,
+};
+use crate::CheckArgs;
+use anyhow::{anyhow, Context, Result};
+use jian_ops_schema::document::PenDocument;
+use jian_ops_schema::error::LoadWarning;
+use jian_ops_schema::screen_projection::ProjectionWarning;
+use std::fs;
+use std::process::ExitCode;
+
+pub fn run(args: CheckArgs) -> Result<ExitCode> {
+    let src =
+        fs::read_to_string(&args.path).with_context(|| format!("read {}", args.path.display()))?;
+    let loaded = jian_ops_schema::load_str(&src)
+        .with_context(|| format!("parse {}", args.path.display()))?;
+
+    // `load_str` only enforces the serde-derivable surface. Walk the
+    // document and apply semantic checks that the .op spec requires
+    // but which can't be expressed in serde annotations.
+    if let Err(e) = semantic_check(&loaded.value) {
+        if args.json {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "severity": "error",
+                    "kind": "semantic",
+                    "detail": { "message": format!("{}", e) },
+                })
+            );
+        } else {
+            let mut buf = String::new();
+            push_diagnostic(
+                &mut buf,
+                &src,
+                &args.path.display().to_string(),
+                Severity::Error,
+                &format!("{}", e),
+                Some(Span::NONE),
+                // semantic errors land on stderr; probing stdout for
+                // color leaks ANSI escapes when stderr is captured.
+                Style::auto_stderr(),
+            );
+            eprint!("{}", buf);
+        }
+        // Same exit code as a parse failure (2) — the document is
+        // structurally valid JSON but violates the .op contract.
+        return Ok(ExitCode::from(2));
+    }
+
+    let (_, projection_warnings) =
+        jian_ops_schema::screen_projection::project_screens(&loaded.value);
+
+    if args.json {
+        print_json(&loaded.warnings, &projection_warnings);
+    } else {
+        print_human(
+            &src,
+            &args.path.display().to_string(),
+            &loaded.warnings,
+            &projection_warnings,
+            args.quiet,
+        );
+    }
+
+    Ok(
+        if loaded.warnings.is_empty() && projection_warnings.is_empty() {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(1)
+        },
+    )
+}
+
+/// Post-deserialisation semantic checks. These express invariants the
+/// `.op` spec requires but that `PenDocument`'s serde derives can't
+/// enforce on their own (e.g. "top-level id is required when `app` is
+/// set"). A real-app `.op` without `id` never ships, so we treat this
+/// as a hard error at `check` time even though deserialisation itself
+/// happily allows it.
+fn semantic_check(doc: &PenDocument) -> Result<()> {
+    if doc.app.is_some() && doc.id.as_deref().filter(|s| !s.is_empty()).is_none() {
+        return Err(anyhow!(
+            "document has `app` but no non-empty top-level `id`; one is required"
+        ));
+    }
+    Ok(())
+}
+
+fn print_human(
+    source: &str,
+    path: &str,
+    warnings: &[LoadWarning],
+    projection_warnings: &[ProjectionWarning],
+    quiet: bool,
+) {
+    if warnings.is_empty() && projection_warnings.is_empty() {
+        if !quiet {
+            println!("jian check: {} — OK, no diagnostics", path);
+        }
+        return;
+    }
+    // Warnings and errors are always printed; `--quiet` only silences
+    // the success-line noise floor so scripts using `check` as a
+    // gating step still see the actionable output on a non-zero exit.
+    println!(
+        "jian check: {} — {} diagnostic{}",
+        path,
+        warnings.len() + projection_warnings.len(),
+        if warnings.len() + projection_warnings.len() == 1 {
+            ""
+        } else {
+            "s"
+        }
+    );
+    let mut buf = String::new();
+    render_warnings(&mut buf, source, path, warnings, Style::auto());
+    for warning in projection_warnings {
+        let (severity, message) = render_projection_warning(warning);
+        push_diagnostic(
+            &mut buf,
+            source,
+            path,
+            severity,
+            &message,
+            Some(Span::NONE),
+            Style::auto(),
+        );
+    }
+    print!("{}", buf);
+}
+
+fn print_json(warnings: &[LoadWarning], projection_warnings: &[ProjectionWarning]) {
+    for w in warnings {
+        let (kind, detail) = warning_tuple(w);
+        let line = serde_json::json!({
+            "severity": "warning",
+            "kind": kind,
+            "detail": detail,
+        });
+        println!("{}", line);
+    }
+    for warning in projection_warnings {
+        let (kind, detail) = projection_warning_tuple(warning);
+        let line = serde_json::json!({
+            "severity": "warning",
+            "kind": kind,
+            "detail": detail,
+        });
+        println!("{}", line);
+    }
+}
+
+fn warning_tuple(w: &LoadWarning) -> (&'static str, serde_json::Value) {
+    match w {
+        LoadWarning::UnknownField { path, field } => (
+            "unknown_field",
+            serde_json::json!({ "path": path, "field": field }),
+        ),
+        LoadWarning::FutureFormatVersion {
+            found,
+            supported_max,
+        } => (
+            "future_format_version",
+            serde_json::json!({ "found": found, "supported_max": supported_max }),
+        ),
+        LoadWarning::ResponsiveBelowMinor { declared } => (
+            "responsive_below_minor",
+            serde_json::json!({ "declared": declared, "required": "1.2" }),
+        ),
+        LoadWarning::LogicModulesSkipped { reason } => (
+            "logic_modules_skipped",
+            serde_json::json!({ "reason": reason }),
+        ),
+        LoadWarning::InvalidExpression { path, expr, reason } => (
+            "invalid_expression",
+            serde_json::json!({ "path": path, "expr": expr, "reason": reason }),
+        ),
+        LoadWarning::LegacyRolePromoted {
+            path,
+            from_role,
+            to,
+        } => (
+            "legacy_role_promoted",
+            serde_json::json!({ "path": path, "from_role": from_role, "to": to }),
+        ),
+        LoadWarning::ViewportWrite { path } => (
+            "viewport_write",
+            serde_json::json!({ "path": path, "message": "$viewport is read-only" }),
+        ),
+    }
+}
+
+fn projection_warning_tuple(warning: &ProjectionWarning) -> (&'static str, serde_json::Value) {
+    match warning {
+        ProjectionWarning::MarkerIgnored { node_id, reason } => (
+            "marker_ignored",
+            serde_json::json!({ "nodeId": node_id, "reason": reason }),
+        ),
+        ProjectionWarning::DuplicatePath { path, node_id } => (
+            "duplicate_path",
+            serde_json::json!({ "path": path, "nodeId": node_id }),
+        ),
+        ProjectionWarning::NoEntryScreen { fallback_node_id } => (
+            "no_entry_screen",
+            serde_json::json!({ "fallbackNodeId": fallback_node_id }),
+        ),
+        ProjectionWarning::AuthoredRoutesIgnored => (
+            "authored_routes_ignored",
+            serde_json::json!({ "message": warning.to_string() }),
+        ),
+        ProjectionWarning::InvalidRangeStripped { node_id } => (
+            "invalid_range_stripped",
+            serde_json::json!({ "nodeId": node_id }),
+        ),
+        ProjectionWarning::DuplicateDefault { path, node_id } => (
+            "duplicate_default",
+            serde_json::json!({ "path": path, "nodeId": node_id }),
+        ),
+        ProjectionWarning::PromotedDefault { path, page_id } => (
+            "promoted_default",
+            serde_json::json!({ "path": path, "pageId": page_id }),
+        ),
+        ProjectionWarning::InteriorOverlap {
+            path,
+            first,
+            second,
+        } => (
+            "interior_overlap",
+            serde_json::json!({ "path": path, "first": first, "second": second }),
+        ),
+        ProjectionWarning::BreakpointWithoutScreen { node_id } => (
+            "breakpoint_without_screen",
+            serde_json::json!({ "nodeId": node_id }),
+        ),
+        ProjectionWarning::PageIdRekeyed { from, to } => (
+            "page_id_rekeyed",
+            serde_json::json!({ "from": from, "to": to }),
+        ),
+    }
+}

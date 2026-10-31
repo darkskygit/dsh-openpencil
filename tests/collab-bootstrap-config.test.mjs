@@ -91,13 +91,24 @@ test('every non-Cargo release child scrubs build-only URLs and handshake parsing
   assert.doesNotMatch(packageVerifier, /JSON\.parse\(line\)|JSON\.stringify\(line\)|\$\{line\}/u)
 })
 
-test('the six-platform release builds and verifies collaboration-enabled native daemons', async () => {
+test('the six-platform release builds stub-daemons and publishes to GitHub Packages', async () => {
   const workflow = await readFile(`${projectRoot}/.github/workflows/release.yml`, 'utf8')
-  assert.match(workflow, /environment: release-production/)
+  const runtimeBuild = await readFile(`${projectRoot}/scripts/build-editor-runtime.mjs`, 'utf8')
+
   assert.match(workflow, /node scripts\/build-editor-runtime\.mjs --target \$\{\{ matrix\.rustTarget \}\}/)
+  assert.match(workflow, /--require-runtime/)
+  assert.match(workflow, /registry-url: \$\{\{ env\.NPM_REGISTRY \}\}/)
+  assert.match(workflow, /NODE_AUTH_TOKEN: \$\{\{ secrets\.GITHUB_TOKEN \}\}/)
+  assert.match(workflow, /packages: write/)
+  assert.match(workflow, /node scripts\/publish-packages\.mjs artifacts/)
+
+  // This fork links the inert auth stub: no collaboration endpoint is injected,
+  // no proprietary ABI gate runs, and no npm environment holds a secret.
   for (const name of collabBootstrapEnvNames) {
-    assert.match(workflow, new RegExp(`${name}: \\\${\\\{ secrets\\.${name} \\\}\\\}`))
+    assert.doesNotMatch(workflow, new RegExp(name), `${name} must not reach the release workflow`)
   }
-  assert.match(workflow, /bash vendor\/openpencil\/tools\/check-op-auth-cargo-build\.sh/)
-  assert.match(workflow, /--require-runtime --require-collab-bootstrap/)
+  assert.doesNotMatch(workflow, /check-op-auth-cargo-build/u)
+  assert.doesNotMatch(workflow, /environment: (?:release-production|npm)/u)
+  assert.doesNotMatch(workflow, /--require-collab-bootstrap/u)
+  assert.match(runtimeBuild, /withoutCollabBootstrapBuildEnv\(process\.env\)/u)
 })

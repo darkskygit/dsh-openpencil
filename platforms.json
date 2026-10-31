@@ -11,7 +11,7 @@
       "cpu": "arm64",
       "rustTarget": "aarch64-apple-darwin",
       "runner": "macos-15",
-      "packageName": "@zseven-w/dsh-openpencil-darwin-arm64",
+      "packageName": "@darkskygit/dsh-openpencil-darwin-arm64",
       "binaryName": "op-host-web-server"
     },
     {
@@ -20,7 +20,7 @@
       "cpu": "x64",
       "rustTarget": "x86_64-apple-darwin",
       "runner": "macos-15-intel",
-      "packageName": "@zseven-w/dsh-openpencil-darwin-x64",
+      "packageName": "@darkskygit/dsh-openpencil-darwin-x64",
       "binaryName": "op-host-web-server"
     },
     {
@@ -30,7 +30,7 @@
       "libc": "glibc",
       "rustTarget": "aarch64-unknown-linux-gnu",
       "runner": "ubuntu-24.04-arm",
-      "packageName": "@zseven-w/dsh-openpencil-linux-arm64",
+      "packageName": "@darkskygit/dsh-openpencil-linux-arm64",
       "binaryName": "op-host-web-server"
     },
     {
@@ -40,7 +40,7 @@
       "libc": "glibc",
       "rustTarget": "x86_64-unknown-linux-gnu",
       "runner": "ubuntu-22.04",
-      "packageName": "@zseven-w/dsh-openpencil-linux-x64",
+      "packageName": "@darkskygit/dsh-openpencil-linux-x64",
       "binaryName": "op-host-web-server"
     },
     {
@@ -49,7 +49,7 @@
       "cpu": "arm64",
       "rustTarget": "aarch64-pc-windows-msvc",
       "runner": "windows-11-arm",
-      "packageName": "@zseven-w/dsh-openpencil-win32-arm64",
+      "packageName": "@darkskygit/dsh-openpencil-win32-arm64",
       "binaryName": "op-host-web-server.exe"
     },
     {
@@ -58,7 +58,7 @@
       "cpu": "x64",
       "rustTarget": "x86_64-pc-windows-msvc",
       "runner": "windows-2025",
-      "packageName": "@zseven-w/dsh-openpencil-win32-x64",
+      "packageName": "@darkskygit/dsh-openpencil-win32-x64",
       "binaryName": "op-host-web-server.exe"
     }
   ]

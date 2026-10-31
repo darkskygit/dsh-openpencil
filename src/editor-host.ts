@@ -217,6 +217,21 @@ function parseImportPenResult(value: unknown): ImportPenResult {
   return { source, target, version, warnings }
 }
 
+export interface RenderDocumentOptions {
+  /** Absolute `.op` document to capture. The daemon never saves it. */
+  path: string
+  signal: AbortSignal
+}
+
+export interface RenderDocumentResult {
+  /** PNG bytes of the active page root. */
+  bytes: Uint8Array
+  mimeType: string
+  /** Managed runtime binary that produced the capture. */
+  binary: string
+  version: number
+}
+
 export interface ImportPenOptions {
   /** Absolute source path of the `.pen` (or legacy `.op`) document. */
   path: string
@@ -930,6 +945,66 @@ export class EditorHostController {
       if (spawnedChild !== undefined) this.#pendingChildren.delete(spawnedChild)
       if (daemon !== undefined) await stopManagedEditorDaemon(daemon)
       await rm(tempRoot, { recursive: true, force: true }).catch(() => {})
+    }
+  }
+
+  /**
+   * Capture one PNG of an existing `.op` document through a managed daemon.
+   * A plugin-only install ships no desktop renderer, and the managed runtime is
+   * the same Rust scene exporter, so capturing here keeps the preview exact
+   * instead of degrading to the external Jian preview. The daemon is transient
+   * and the document is only read.
+   */
+  async renderDocument(options: RenderDocumentOptions): Promise<RenderDocumentResult> {
+    const runtime = this.runtime
+    if (runtime === undefined) throw new Error(this.#runtimeUnavailableMessage())
+    options.signal.throwIfAborted()
+    if (this.#disposePromise !== undefined) throw new Error('OpenPencil editor host is shutting down')
+    return this.#serializeLaunch(async () => {
+      options.signal.throwIfAborted()
+      if (this.#disposePromise !== undefined) throw new Error('OpenPencil editor host is shutting down')
+      return this.#renderDocument(runtime, options)
+    })
+  }
+
+  async #renderDocument(runtime: EditorRuntime, options: RenderDocumentOptions): Promise<RenderDocumentResult> {
+    let daemon: ManagedEditorDaemon | undefined
+    let spawnedChild: ChildProcessWithoutNullStreams | undefined
+    try {
+      daemon = await startManagedEditorDaemon(runtime, {
+        sourcePath: options.path,
+        allowOrigin: 'http://127.0.0.1',
+        signal: options.signal,
+        onSpawn: child => {
+          spawnedChild = child
+          this.#pendingChildren.add(child)
+        },
+      })
+      const before = await readManagedEditorDaemon(daemon, options.signal)
+      const result = await callOpenPencilMcp({
+        baseUrl: daemon.baseUrl,
+        token: daemon.token,
+        tool: 'get_screenshot',
+        arguments: { nodeId: 'root' },
+        signal: options.signal,
+      })
+      const after = await readManagedEditorDaemon(daemon, options.signal)
+      if (after.version !== before.version) {
+        throw new Error('OpenPencil document changed while its preview was captured')
+      }
+      if (result.images.length !== 1) {
+        throw new Error('OpenPencil preview capture did not return exactly one bounded image')
+      }
+      const image = result.images[0]!
+      return {
+        bytes: Buffer.from(image.bytes),
+        mimeType: image.mimeType,
+        binary: runtime.binary,
+        version: before.version,
+      }
+    } finally {
+      if (spawnedChild !== undefined) this.#pendingChildren.delete(spawnedChild)
+      if (daemon !== undefined) await stopManagedEditorDaemon(daemon)
     }
   }
 

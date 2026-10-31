@@ -1017,6 +1017,13 @@ export async function createRenderOutput(): Promise<string> {
   return join(renderDir(), `render-${randomUUID()}.png`)
 }
 
+/** Persist PNG bytes captured from the managed runtime into the render cache. */
+export async function writeRenderPng(bytes: Uint8Array): Promise<string> {
+  const out = await createRenderOutput()
+  await writeFile(out, Buffer.from(bytes), { mode: 0o600 })
+  return out
+}
+
 /** Stat + cap-check a freshly rendered PNG. */
 export async function verifyRenderOutput(out: string): Promise<{
   bytes: number

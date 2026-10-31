@@ -19,6 +19,7 @@ import {
   RendererBinaryMissingError,
   createDocumentSnapshot,
   createRenderOutput,
+  writeRenderPng,
   findOpenPencilBinary,
   findJianBinary,
   projectRenderGrant,
@@ -196,17 +197,34 @@ export function createDesignRenderTool(
           warnings.push('OpenPencil exact renderer was unavailable; using lower-fidelity Jian runtime preview.')
         }
       } else {
-        const fallback = await createRenderOutput()
-        const jian = findJianBinary()
-        await runJianRender({
-          binary: jian, input: document.path, out: fallback,
-          width: args.width, height: args.height, scale: args.scale, signal: exec.signal,
-        })
-        out = fallback
-        renderer = 'jian'
-        rendererBinary = jian
-        fidelity = 'runtime-preview'
-        warnings.push('OpenPencil exact renderer was not found; using lower-fidelity Jian runtime preview.')
+        // A plugin-only install ships the managed runtime and no desktop
+        // renderer. That runtime is the same Rust scene exporter, so capture
+        // the preview through a transient daemon instead of degrading to the
+        // external Jian preview, which such an install does not carry either.
+        try {
+          if (editorHost === undefined) throw new Error('the managed OpenPencil runtime host is unavailable')
+          const capture = await editorHost.renderDocument({ path: document.path, signal: exec.signal })
+          out = await writeRenderPng(capture.bytes)
+          renderer = 'openpencil'
+          rendererBinary = capture.binary
+          fidelity = 'exact'
+          warnings.push('Rendered through the managed OpenPencil runtime.')
+        } catch (error) {
+          const fallback = await createRenderOutput()
+          const jian = findJianBinary()
+          await runJianRender({
+            binary: jian, input: document.path, out: fallback,
+            width: args.width, height: args.height, scale: args.scale, signal: exec.signal,
+          })
+          out = fallback
+          renderer = 'jian'
+          rendererBinary = jian
+          fidelity = 'runtime-preview'
+          warnings.push(
+            'OpenPencil exact renderer was not found and the managed runtime capture failed'
+            + ` (${error instanceof Error ? error.message : String(error)}); using lower-fidelity Jian runtime preview.`,
+          )
+        }
       }
       const verified = await verifyRenderOutput(out)
       const frames: RenderFrame[] | undefined = exactFrames === undefined

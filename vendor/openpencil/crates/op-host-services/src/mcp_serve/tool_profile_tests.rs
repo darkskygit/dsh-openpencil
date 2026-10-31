@@ -73,6 +73,9 @@ fn the_denied_set_is_exactly_the_reviewed_list() {
             "export_frames",
             "import_html",
             "import_html_url",
+            // Converts a .pen source into a caller-chosen .op path on the
+            // daemon host — local filesystem, denied online like import_html.
+            "import_pen",
             "import_svg",
             "import_web_snapshot",
             // Reads the host's imported DESIGN.md files, which carry no tenant

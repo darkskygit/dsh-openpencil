@@ -333,6 +333,12 @@ fn validates_every_committed_target_archive() {
     let crate_root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let policy_path = crate_root.join("AUTH-RELEASE-POLICY");
     let prebuilt_root = crate_root.join("prebuilt");
+    // This fork removes the proprietary matrix, so there is no committed
+    // archive left to validate. The other tests still drive the validator
+    // through synthetic fixtures.
+    if !prebuilt_root.is_dir() {
+        return;
+    }
     let mut validated_targets = 0_usize;
     for entry in fs::read_dir(&prebuilt_root).unwrap() {
         let entry = entry.unwrap();

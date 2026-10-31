@@ -48,11 +48,13 @@ import {
   OPENPENCIL_CREATE_TOOL_NAME,
   OPENPENCIL_EDIT_TOOL_NAME,
   OPENPENCIL_NEW_TOOL_NAME,
+  OPENPENCIL_IMPORT_TOOL_NAME,
   OPENPENCIL_RENDER_TOOL_NAME,
   OPENPENCIL_SELECTION_TOOL_NAME,
   OPENPENCIL_TOOL_NAMES,
 } from './tool-names.js'
 import { createDesignDraftToolController } from './design-draft-tools.js'
+import { createDesignImportTool } from './import-tool.js'
 import {
   PRESENTATION_HYDRATION_ROUTE,
   PresentationHydrationController,
@@ -65,6 +67,7 @@ import {
 export {
   LEGACY_DESIGN_RENDER_TOOL_NAME,
   OPENPENCIL_CREATE_TOOL_NAME,
+  OPENPENCIL_IMPORT_TOOL_NAME,
   OPENPENCIL_EDIT_TOOL_NAME,
   OPENPENCIL_NEW_TOOL_NAME,
   OPENPENCIL_PIPELINE_ABORT_TOOL_NAME,
@@ -226,6 +229,10 @@ export async function apply(ctx: Context): Promise<() => Promise<void>> {
   disposers.push(ctx.effect(
     () => hostCtx.tools.register(createDesignEditTool(editorHost)),
     `dsh-openpencil: ${OPENPENCIL_EDIT_TOOL_NAME} tool`,
+  ))
+  disposers.push(ctx.effect(
+    () => hostCtx.tools.register(createDesignImportTool(editorHost)),
+    `dsh-openpencil: ${OPENPENCIL_IMPORT_TOOL_NAME} tool`,
   ))
   for (const tool of designDraftTools.createTools()) {
     disposers.push(ctx.effect(

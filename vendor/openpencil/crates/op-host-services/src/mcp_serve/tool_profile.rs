@@ -506,6 +506,13 @@ pub const TOOL_PROFILES: &[ToolProfile] = &[
         ToolAccess::Write,
         ToolSurface::LocalFilesystem,
     ),
+    // Converts a `.pen` / legacy `.op` source into a current-schema `.op`
+    // target, so it touches the daemon host filesystem at caller-chosen paths.
+    ToolProfile::new(
+        "import_pen",
+        ToolAccess::Write,
+        ToolSurface::LocalFilesystem,
+    ),
     ToolProfile::new(
         "import_html_url",
         ToolAccess::Write,

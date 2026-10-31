@@ -15,6 +15,7 @@ use std::io::{BufRead, BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 
 use crate::import_html_url::import_html_url_snapshot;
+use crate::import_pen::import_pen_snapshot;
 use op_editor_core::{EditorCommand, EditorState};
 use op_mcp::import_html_tool::import_html_snapshot;
 use op_mcp::import_snapshot_tool::import_web_snapshot_tool;

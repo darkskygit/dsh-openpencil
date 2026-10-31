@@ -11,6 +11,7 @@ export const OPENPENCIL_PIPELINE_AGENT_RUN_TOOL_NAME = 'openpencil_pipeline_agen
 export const OPENPENCIL_PIPELINE_INSPECT_TOOL_NAME = 'openpencil_pipeline_inspect' as const
 export const OPENPENCIL_PIPELINE_FINISH_TOOL_NAME = 'openpencil_pipeline_finish' as const
 export const OPENPENCIL_PIPELINE_ABORT_TOOL_NAME = 'openpencil_pipeline_abort' as const
+export const OPENPENCIL_IMPORT_TOOL_NAME = 'openpencil_import' as const
 
 export const OPENPENCIL_STYLE_PLAN_TOOL_NAME = 'openpencil_style_plan' as const
 export const OPENPENCIL_STYLE_CONFIRM_TOOL_NAME = 'openpencil_style_confirm' as const
@@ -42,4 +43,5 @@ export const OPENPENCIL_TOOL_NAMES = [
   ...OPENPENCIL_PIPELINE_TOOL_NAMES,
   OPENPENCIL_STYLE_PLAN_TOOL_NAME,
   OPENPENCIL_STYLE_CONFIRM_TOOL_NAME,
+  OPENPENCIL_IMPORT_TOOL_NAME,
 ] as const

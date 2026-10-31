@@ -84,6 +84,7 @@ pub mod hub_auth_client;
 pub mod hub_auth_error;
 mod import_html_url;
 mod import_html_url_error;
+mod import_pen;
 pub mod loop_blocker_ledger;
 pub mod mcp_live;
 pub mod mcp_serve;

@@ -196,6 +196,7 @@ fn normalize_node_value(
                     let is_icon = kind == Some("icon");
                     let is_prompt = kind == Some("prompt");
                     let is_path = kind == Some("path");
+                    let is_text = kind == Some("text");
                     let reverse_auto_layout_children = repair_legacy_figma_child_order
                         && kind == Some("frame")
                         && matches!(
@@ -221,6 +222,13 @@ fn normalize_node_value(
                     if is_prompt {
                         map.insert("type".to_string(), Value::String("text".to_string()));
                         map.remove("model");
+                        *changed = true;
+                    }
+                    // Pencil omits `content` on a text node with no body. The
+                    // canonical schema requires the field, so an absent body
+                    // loads as an empty string instead of failing the import.
+                    if (is_text || is_prompt) && !map.contains_key("content") {
+                        map.insert("content".to_string(), Value::String(String::new()));
                         *changed = true;
                     }
                     // Pencil's legacy `icon` node is jian's `icon_font`: the

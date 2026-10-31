@@ -194,6 +194,46 @@ export interface CreateDocumentBatchResult {
   result: unknown
 }
 
+/**
+ * Read the `import_pen` payload. The daemon answers with the conversion result
+ * as JSON, so a shape mismatch means a runtime/plugin version skew, not a bad
+ * document: report it instead of inventing defaults.
+ */
+function parseImportPenResult(value: unknown): ImportPenResult {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) {
+    throw new Error('OpenPencil import_pen returned an invalid result')
+  }
+  const record = value as Record<string, unknown>
+  const source = record.source
+  const target = record.target
+  const version = record.version
+  if (typeof source !== 'string' || typeof target !== 'string' || typeof version !== 'string') {
+    throw new Error('OpenPencil import_pen returned an incomplete result')
+  }
+  const rawWarnings = record.warnings
+  const warnings = Array.isArray(rawWarnings)
+    ? rawWarnings.filter((warning): warning is string => typeof warning === 'string')
+    : []
+  return { source, target, version, warnings }
+}
+
+export interface ImportPenOptions {
+  /** Absolute source path of the `.pen` (or legacy `.op`) document. */
+  path: string
+  /** Absolute `.op` target. Defaults to the source path with a `.op` extension. */
+  target?: string
+  /** Replace an existing target file. */
+  overwrite?: boolean
+  signal: AbortSignal
+}
+
+export interface ImportPenResult {
+  source: string
+  target: string
+  version: string
+  warnings: string[]
+}
+
 function json(res: ServerResponse, status: number, value: unknown): void {
   const body = JSON.stringify(value)
   res.statusCode = status
@@ -886,6 +926,59 @@ export class EditorHostController {
       } finally {
         options.signal.removeEventListener('abort', onAbort)
       }
+    } finally {
+      if (spawnedChild !== undefined) this.#pendingChildren.delete(spawnedChild)
+      if (daemon !== undefined) await stopManagedEditorDaemon(daemon)
+      await rm(tempRoot, { recursive: true, force: true }).catch(() => {})
+    }
+  }
+
+  /**
+   * Convert a `.pen` (or legacy `.op`) source into a current-schema `.op` target.
+   * The managed daemon is transient: it runs the conversion against a scratch
+   * document and then stops, so this never depends on, or disturbs, a visible
+   * editor session. The source file is only read.
+   */
+  async importPen(options: ImportPenOptions): Promise<ImportPenResult> {
+    const runtime = this.runtime
+    if (runtime === undefined) throw new Error(this.#runtimeUnavailableMessage())
+    options.signal.throwIfAborted()
+    if (this.#disposePromise !== undefined) throw new Error('OpenPencil editor host is shutting down')
+    return this.#serializeLaunch(async () => {
+      options.signal.throwIfAborted()
+      if (this.#disposePromise !== undefined) throw new Error('OpenPencil editor host is shutting down')
+      return this.#importPen(runtime, options)
+    })
+  }
+
+  async #importPen(runtime: EditorRuntime, options: ImportPenOptions): Promise<ImportPenResult> {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'dsh-openpencil-import-'))
+    const scratchPath = join(tempRoot, 'scratch.op')
+    let daemon: ManagedEditorDaemon | undefined
+    let spawnedChild: ChildProcessWithoutNullStreams | undefined
+    try {
+      await writeFile(scratchPath, EMPTY_DOCUMENT_JSON, { flag: 'wx', mode: 0o600 })
+      options.signal.throwIfAborted()
+      daemon = await startManagedEditorDaemon(runtime, {
+        sourcePath: scratchPath,
+        allowOrigin: 'http://127.0.0.1',
+        signal: options.signal,
+        onSpawn: child => {
+          spawnedChild = child
+          this.#pendingChildren.add(child)
+        },
+      })
+      const arguments_: Record<string, unknown> = { path: options.path }
+      if (options.target !== undefined) arguments_.target = options.target
+      if (options.overwrite === true) arguments_.overwrite = 'true'
+      const result = await callOpenPencilMcp({
+        baseUrl: daemon.baseUrl,
+        token: daemon.token,
+        tool: 'import_pen',
+        arguments: arguments_,
+        signal: options.signal,
+      })
+      return parseImportPenResult(result.value)
     } finally {
       if (spawnedChild !== undefined) this.#pendingChildren.delete(spawnedChild)
       if (daemon !== undefined) await stopManagedEditorDaemon(daemon)

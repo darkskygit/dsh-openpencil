@@ -20,6 +20,10 @@ import { join, resolve } from 'node:path'
 const argumentRoot = resolve(process.argv[2] ?? 'artifacts')
 const registry = process.env.NPM_REGISTRY ?? 'https://npm.pkg.github.com'
 const rootPackageName = '@darkskygit/dsh-openpencil'
+// npm refuses to publish a prerelease without an explicit dist-tag, because the
+// implied `latest` tag is reserved for stable releases. This fork tracks one
+// channel, so pass the tag explicitly and let a release override it.
+const distTag = process.env.NPM_DIST_TAG ?? 'latest'
 
 function run(command, args) {
   return spawnSync(command, args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] })
@@ -59,7 +63,7 @@ function isPublished(name, version) {
 }
 
 function publish(tarball) {
-  const result = run('npm', ['publish', tarball, '--registry', registry, '--access', 'public'])
+  const result = run('npm', ['publish', tarball, '--registry', registry, '--access', 'public', '--tag', distTag])
   if (result.status !== 0) {
     throw new Error(`npm publish ${tarball} failed: ${result.stderr.trim() || result.stdout.trim()}`)
   }
@@ -83,7 +87,7 @@ for (const { tarball, report } of [...natives, ...roots]) {
     continue
   }
   publish(tarball)
-  process.stdout.write(`publish ${label}\n`)
+  process.stdout.write(`publish ${label} (dist-tag ${distTag})\n`)
   published += 1
 }
 
